@@ -1,0 +1,3 @@
+{"text":"我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。","expected_type":"purchase"}
+{"text":"Netflix 会员每月 68 元，下个月 15 号自动续费，提前 3 天提醒我。","expected_type":"subscription"}
+{"text":"这个月房租 4500 元，月底前缴费，提前两天提醒。","expected_type":"bill"}

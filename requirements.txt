@@ -1,0 +1,4 @@
+pydantic>=2.7,<3
+requests>=2.31,<3
+streamlit>=1.36,<2
+plyer>=2.1,<3
