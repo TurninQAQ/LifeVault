@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import date
-
 import streamlit as st
 
-from lifevault.agent.service import ConfirmationRequired, LifeVaultAgent
+from lifevault.agent.graph_agent import GraphAgent
 from lifevault.config import get_settings
-from lifevault.models.schemas import RecordStatus, ReminderStatus, UserPreference
+from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus, UserPreference
 from lifevault.storage.repository import VaultRepository
 
 
@@ -14,10 +12,10 @@ st.set_page_config(page_title="LifeVault", page_icon="LV", layout="wide")
 
 
 @st.cache_resource
-def get_services() -> tuple[LifeVaultAgent, VaultRepository]:
+def get_services() -> tuple[GraphAgent, VaultRepository]:
     settings = get_settings()
     repository = VaultRepository(settings.database_path)
-    return LifeVaultAgent(settings, repository), repository
+    return GraphAgent(settings, repository), repository
 
 
 def main() -> None:
@@ -40,7 +38,18 @@ def main() -> None:
         render_settings(repository, settings.default_user_id)
 
 
-def render_add_record(agent: LifeVaultAgent) -> None:
+def render_add_record(agent: GraphAgent) -> None:
+    recover_cols = st.columns([2, 1])
+    thread_id = recover_cols[0].text_input("thread_id", value=st.session_state.get("thread_id", ""))
+    if recover_cols[1].button("恢复"):
+        if thread_id.strip():
+            turn = agent.get_state(thread_id.strip())
+            if turn:
+                st.session_state["graph_turn"] = turn
+                st.session_state["thread_id"] = turn.thread_id
+            else:
+                st.error("没有找到这个 thread_id")
+
     text = st.text_area(
         "自然语言输入",
         height=140,
@@ -48,47 +57,97 @@ def render_add_record(agent: LifeVaultAgent) -> None:
     )
     if st.button("解析", type="primary", use_container_width=False):
         if text.strip():
-            st.session_state["draft"] = agent.create_draft(text)
+            turn = agent.start_create_record(text)
+            st.session_state["graph_turn"] = turn
+            st.session_state["thread_id"] = turn.thread_id
 
-    draft = st.session_state.get("draft")
-    if not draft:
+    turn: GraphTurn | None = st.session_state.get("graph_turn")
+    if not turn:
         return
 
-    if draft.warnings:
-        for warning in draft.warnings:
-            st.warning(warning)
-    if draft.missing_fields:
-        st.error("缺少必要字段：" + "，".join(draft.missing_fields))
-        st.json(draft.candidate.model_dump(mode="json"))
+    render_graph_turn(agent, turn)
+
+
+def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
+    st.caption(f"thread_id: {turn.thread_id}")
+    if turn.status == "cancelled":
+        st.warning("流程已取消")
+    elif turn.status == "completed":
+        st.success("流程已完成")
+
+    if turn.errors:
+        for error in turn.errors:
+            st.error(error)
+
+    if turn.interrupt_type == "missing_fields":
+        st.error("缺少必要字段：" + "，".join(turn.missing_fields))
+        if turn.candidate:
+            st.json(turn.candidate)
+        supplement = st.text_area("补充内容", key=f"supplement_{turn.thread_id}", height=100)
+        cols = st.columns(2)
+        if cols[0].button("提交补充", type="primary"):
+            if supplement.strip():
+                st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"text": supplement})
+                st.rerun()
+        if cols[1].button("取消流程"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "cancel"})
+            st.rerun()
         return
 
+    if turn.interrupt_type == "duplicate_review":
+        st.warning("发现疑似重复记录")
+        for duplicate in turn.duplicate_candidates:
+            st.write(f"{duplicate.get('title')} | {duplicate.get('score', 0):.2f} | {duplicate.get('reason')}")
+        if turn.record:
+            st.subheader("新记录预览")
+            st.json(turn.record)
+        cols = st.columns(2)
+        if cols[0].button("继续保存", type="primary"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "continue"})
+            st.rerun()
+        if cols[1].button("取消流程"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "cancel"})
+            st.rerun()
+        return
+
+    if turn.interrupt_type == "record_confirmation":
+        st.subheader("记录预览")
+        st.json(turn.record or {})
+        cols = st.columns(2)
+        if cols[0].button("确认保存", type="primary"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "confirm"})
+            st.rerun()
+        if cols[1].button("取消流程"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "cancel"})
+            st.rerun()
+        return
+
+    if turn.interrupt_type == "reminder_confirmation":
+        left, right = st.columns(2)
+        with left:
+            st.subheader("已保存记录")
+            st.json(turn.record or {})
+        with right:
+            st.subheader("提醒预览")
+            st.json(turn.reminder or {})
+        cols = st.columns(2)
+        if cols[0].button("确认提醒", type="primary"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "confirm"})
+            st.rerun()
+        if cols[1].button("跳过提醒"):
+            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "skip"})
+            st.rerun()
+        return
+
+    if not turn.record and not turn.reminder:
+        return
     left, right = st.columns(2)
     with left:
-        st.subheader("记录预览")
-        st.json(draft.record.model_dump(mode="json") if draft.record else {})
+        st.subheader("记录")
+        st.json(turn.record or {})
     with right:
-        st.subheader("提醒预览")
-        st.json(draft.reminder.model_dump(mode="json") if draft.reminder else {"reminder": None})
-
-    if draft.duplicate_candidates:
-        st.warning("发现疑似重复记录")
-        for duplicate in draft.duplicate_candidates:
-            st.write(f"{duplicate.title} | {duplicate.score:.2f} | {duplicate.reason}")
-
-    create_reminder = st.checkbox("同时创建提醒", value=draft.reminder is not None, disabled=draft.reminder is None)
-    if st.button("确认保存", type="primary"):
-        try:
-            result = agent.save_draft(
-                draft,
-                user_confirmed_record=True,
-                user_confirmed_reminder=create_reminder,
-            )
-            st.success(f"已保存记录：{result.record.id}")
-            if result.reminder:
-                st.success(f"已创建提醒：{result.reminder.scheduled_at.isoformat()}")
-            st.session_state.pop("draft", None)
-        except ConfirmationRequired as exc:
-            st.error(str(exc))
+        st.subheader("提醒")
+        st.json(turn.reminder or {})
 
 
 def render_records(repository: VaultRepository, user_id: str) -> None:

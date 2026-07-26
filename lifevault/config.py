@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 @dataclass(frozen=True)
 class Settings:
     database_path: Path = PROJECT_ROOT / "data" / "lifevault.db"
+    langgraph_checkpoint_path: Path = PROJECT_ROOT / "data" / "langgraph_checkpoints.sqlite"
     qwen_base_url: str = "http://127.0.0.1:8008/v1"
     qwen_model: str = "qwen-enterprise-agent"
     qwen_timeout_seconds: int = 60
@@ -25,6 +26,9 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         database_path=Path(os.getenv("LIFEVAULT_DB", PROJECT_ROOT / "data" / "lifevault.db")),
+        langgraph_checkpoint_path=Path(
+            os.getenv("LIFEVAULT_LANGGRAPH_DB", PROJECT_ROOT / "data" / "langgraph_checkpoints.sqlite")
+        ),
         qwen_base_url=os.getenv("LIFEVAULT_QWEN_BASE_URL", "http://127.0.0.1:8008/v1"),
         qwen_model=os.getenv("LIFEVAULT_QWEN_MODEL", "qwen-enterprise-agent"),
         qwen_timeout_seconds=int(os.getenv("LIFEVAULT_QWEN_TIMEOUT", "60")),

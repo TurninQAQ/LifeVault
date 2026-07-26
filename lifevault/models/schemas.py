@@ -169,6 +169,22 @@ class SaveResult(BaseModel):
     duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
 
 
+class GraphTurn(BaseModel):
+    thread_id: str
+    status: Literal["running", "interrupted", "completed", "cancelled"]
+    interrupt_type: str | None = None
+    prompt: str | None = None
+    interrupt_payload: dict[str, Any] | None = None
+    missing_fields: list[str] = Field(default_factory=list)
+    duplicate_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    candidate: dict[str, Any] | None = None
+    record: dict[str, Any] | None = None
+    reminder: dict[str, Any] | None = None
+    saved_record_id: str | None = None
+    reminder_id: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
 class UserPreference(BaseModel):
     user_id: str
     default_time: str = "09:00"
