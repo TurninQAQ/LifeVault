@@ -18,7 +18,7 @@ class AgentTest(unittest.TestCase):
             )
             repo = VaultRepository(settings.database_path)
             agent = LifeVaultAgent(settings, repo)
-            draft = agent.create_draft("我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。")
+            draft = agent.create_draft("我 2026-07-25 在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。")
             self.assertTrue(draft.is_ready_to_save, draft.missing_fields)
             self.assertEqual(draft.record.title, "耳机")
             self.assertEqual(draft.record.deadline.isoformat(), "2026-08-01")

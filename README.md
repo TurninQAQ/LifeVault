@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.2 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.3 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -66,6 +66,42 @@ python -m lifevault.cli resume THREAD_ID --action confirm
 python -m lifevault.cli resume THREAD_ID --action skip
 ```
 
+## MCP Server
+
+Run the Personal Vault MCP server over stdio:
+
+```bash
+python3 -m lifevault.mcp_server.server
+```
+
+The CLI wrapper is equivalent:
+
+```bash
+python3 -m lifevault.cli mcp-server
+```
+
+Run a real stdio MCP smoke test:
+
+```bash
+python3 -m lifevault.cli mcp-smoke
+```
+
+MCP tools:
+
+```text
+save_record
+search_records
+get_record
+find_duplicate
+update_record_status
+create_reminder
+list_reminders
+snooze_reminder
+cancel_reminder
+```
+
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`.
+
 ## Streamlit
 
 ```bash
@@ -86,6 +122,7 @@ python -m unittest discover -s tests -v
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
 - `lifevault/agent`: LangGraph create-record workflow plus the v0.1 service fallback.
+- `lifevault/mcp_server`: FastMCP stdio server and smoke client.
 - `lifevault/app`: Streamlit UI.
 - `lifevault/worker`: reminder scanner and notification sender.
 - `skills`: task-specific extraction instructions for purchase, subscription, and bill records.

@@ -377,6 +377,99 @@ class VaultRepository:
             rows = conn.execute(sql, params).fetchall()
             return [self._row_to_reminder(row) for row in rows]
 
+    def get_reminder(self, user_id: str, reminder_id: str) -> Reminder | None:
+        with connect(self.database_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                (user_id, reminder_id),
+            ).fetchone()
+            return self._row_to_reminder(row) if row else None
+
+    def snooze_reminder(
+        self,
+        user_id: str,
+        reminder_id: str,
+        new_scheduled_at: datetime,
+        idempotency_key: str,
+        actor: str = "agent",
+    ) -> Reminder:
+        with connect(self.database_path) as conn:
+            existing_new = conn.execute(
+                "SELECT * FROM reminders WHERE user_id = ? AND idempotency_key = ?",
+                (user_id, idempotency_key),
+            ).fetchone()
+            if existing_new:
+                return self._row_to_reminder(existing_new)
+
+            original = conn.execute(
+                "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                (user_id, reminder_id),
+            ).fetchone()
+            if not original:
+                raise ValueError("Reminder not found.")
+            if original["status"] == ReminderStatus.CANCELLED.value:
+                raise ValueError("Cancelled reminders cannot be snoozed.")
+
+            duplicate = conn.execute(
+                """
+                SELECT * FROM reminders
+                WHERE record_id = ? AND reminder_type = ? AND scheduled_at = ?
+                """,
+                (
+                    original["record_id"],
+                    original["reminder_type"],
+                    _dt_to_text(new_scheduled_at),
+                ),
+            ).fetchone()
+            if duplicate:
+                return self._row_to_reminder(duplicate)
+
+            now = _utc_now().isoformat()
+            conn.execute(
+                """
+                UPDATE reminders
+                SET status = ?, updated_at = ?
+                WHERE user_id = ? AND id = ?
+                """,
+                (ReminderStatus.SNOOZED.value, now, user_id, reminder_id),
+            )
+
+            new_id = str(uuid4())
+            conn.execute(
+                """
+                INSERT INTO reminders(
+                    id, record_id, user_id, scheduled_at, reminder_type, message, status,
+                    parent_id, idempotency_key, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    original["record_id"],
+                    user_id,
+                    _dt_to_text(new_scheduled_at),
+                    original["reminder_type"],
+                    original["message"],
+                    ReminderStatus.PENDING.value,
+                    reminder_id,
+                    idempotency_key,
+                    now,
+                    now,
+                ),
+            )
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action="snooze_reminder",
+                target_id=reminder_id,
+                result="ok",
+                params_summary=json.dumps(
+                    {"new_reminder_id": new_id, "new_scheduled_at": _dt_to_text(new_scheduled_at)}
+                ),
+            )
+            row = conn.execute("SELECT * FROM reminders WHERE id = ?", (new_id,)).fetchone()
+            return self._row_to_reminder(row)
+
     def claim_due_reminders(
         self,
         user_id: str,
@@ -462,12 +555,12 @@ class VaultRepository:
                 params_summary=reason[:500],
             )
 
-    def cancel_reminder(self, user_id: str, reminder_id: str, user_confirmed: bool) -> None:
+    def cancel_reminder(self, user_id: str, reminder_id: str, user_confirmed: bool) -> Reminder:
         if not user_confirmed:
             raise PermissionError("Reminder cancellation requires user confirmation.")
         with connect(self.database_path) as conn:
             now = _utc_now().isoformat()
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE reminders
                 SET status = ?, updated_at = ?
@@ -482,6 +575,18 @@ class VaultRepository:
                     ReminderStatus.SNOOZED.value,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise ValueError("Reminder not found or cannot be cancelled.")
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor="user",
+                action="cancel_reminder",
+                target_id=reminder_id,
+                result="ok",
+            )
+            row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
+            return self._row_to_reminder(row)
 
     def save_checkpoint(self, thread_id: str, checkpoint_data: dict[str, Any]) -> None:
         with connect(self.database_path) as conn:

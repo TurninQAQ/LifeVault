@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from lifevault.agent.graph_agent import GraphAgent
@@ -55,8 +58,27 @@ def main() -> None:
     worker.add_argument("--once", action="store_true", help="Scan once and exit")
     worker.add_argument("--interval", type=int, default=60)
 
+    sub.add_parser("mcp-server", help="Run the Personal Vault MCP server over stdio")
+
+    mcp_smoke = sub.add_parser("mcp-smoke", help="Run a stdio MCP smoke test")
+    mcp_smoke.add_argument("--db", type=Path, default=None, help="Optional SQLite database path")
+
     args = parser.parse_args()
     settings = get_settings()
+
+    if args.command == "mcp-server":
+        from lifevault.mcp_server.server import main as run_mcp_server
+
+        run_mcp_server()
+        return
+
+    if args.command == "mcp-smoke":
+        from lifevault.mcp_server.smoke import run_smoke
+
+        result = asyncio.run(run_smoke(args.db, cwd=Path.cwd()))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     repository = VaultRepository(settings.database_path)
     agent = LifeVaultAgent(settings, repository)
     graph_agent = GraphAgent(settings, repository)
@@ -137,6 +159,7 @@ def main() -> None:
             print(f"Processed reminders: {count}")
         else:
             worker_service.run_forever(interval_seconds=args.interval)
+        return
 
 
 def drive_graph_interactively(
