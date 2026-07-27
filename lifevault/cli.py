@@ -76,6 +76,11 @@ def main() -> None:
     mcp_smoke = sub.add_parser("mcp-smoke", help="Run a stdio MCP smoke test")
     mcp_smoke.add_argument("--db", type=Path, default=None, help="Optional SQLite database path")
 
+    eval_cmd = sub.add_parser("eval", help="Run extraction eval cases")
+    eval_cmd.add_argument("--examples", type=Path, default=None, help="JSONL eval examples path")
+    eval_cmd.add_argument("--use-qwen", action="store_true", help="Use configured local Qwen instead of fallback")
+    eval_cmd.add_argument("--json-out", type=Path, default=None, help="Optional JSON report output path")
+
     args = parser.parse_args()
     settings = get_settings()
 
@@ -90,6 +95,20 @@ def main() -> None:
 
         result = asyncio.run(run_smoke(args.db, cwd=Path.cwd()))
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "eval":
+        from lifevault.eval.runner import DEFAULT_EXAMPLES_PATH, format_summary, run_eval, write_json_report
+
+        report = run_eval(
+            settings,
+            examples_path=args.examples or DEFAULT_EXAMPLES_PATH,
+            use_qwen=args.use_qwen,
+        )
+        print(format_summary(report))
+        if args.json_out:
+            write_json_report(report, args.json_out)
+            print(f"Wrote JSON report: {args.json_out}")
         return
 
     repository = VaultRepository(settings.database_path)

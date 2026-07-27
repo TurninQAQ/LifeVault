@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.7 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.8 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -36,6 +36,14 @@ v0.7 hardens reminder delivery:
 - Quiet hours automatically snooze due reminders to the quiet-hours end time, preserving parent/child reminder history.
 - Desktop notification failure still falls back to console output, but the reminder is marked `failed` because the target channel did not deliver.
 - CLI and Streamlit reminder center can snooze pending reminders through MCP.
+
+v0.8 adds an extraction evaluation baseline:
+
+- `sample_data/examples.jsonl` contains 60 hand-written extraction cases for purchases, subscriptions, bills, searches, and missing-field inputs.
+- `python -m lifevault.cli eval` runs a dry-run extractor evaluation without saving records or creating reminders.
+- Evaluation defaults to the deterministic fallback extractor for reproducible local results; `--use-qwen` can run the configured local Qwen manually.
+- Optional `--json-out` writes per-case expected/actual/mismatch details.
+- Current fallback baseline on the included 60 cases: intent accuracy 100.0%, record type accuracy 93.2%, field accuracy 85.4%, full-case accuracy 48.3%.
 
 Create-record interrupts:
 
@@ -82,6 +90,8 @@ python -m lifevault.cli reminders
 python -m lifevault.cli snooze-reminder REMINDER_ID --minutes 60
 python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:00
 python -m lifevault.cli worker --once
+python -m lifevault.cli eval
+python -m lifevault.cli eval --json-out eval_report.json
 ```
 
 Resume an interrupted graph thread:

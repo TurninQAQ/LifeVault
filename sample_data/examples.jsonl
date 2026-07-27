@@ -1,3 +1,60 @@
-{"text":"我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。","expected_type":"purchase"}
-{"text":"Netflix 会员每月 68 元，下个月 15 号自动续费，提前 3 天提醒我。","expected_type":"subscription"}
-{"text":"这个月房租 4500 元，月底前缴费，提前两天提醒。","expected_type":"bill"}
+{"id":"purchase_001","text":"我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。","expected":{"intent":"create_record","record_type":"purchase","title":"耳机","amount":3499,"merchant":"京东","order_number":"123456","return_days":7,"remind_before_days":2}}
+{"id":"purchase_002","text":"2026-07-25 在淘宝买了一个键盘，899 元，订单号 KB20260725，7 天无理由，提前 1 天提醒。","expected":{"intent":"create_record","record_type":"purchase","title":"键盘","amount":899,"merchant":"淘宝","order_number":"KB20260725","return_days":7,"remind_before_days":1}}
+{"id":"purchase_003","text":"前天从拼多多购买了一台显示器，1299 元，订单号 PDD-7788，七天退货，退货前两天提醒。","expected":{"intent":"create_record","record_type":"purchase","title":"显示器","amount":1299,"merchant":"拼多多","order_number":"PDD-7788","return_days":7,"remind_before_days":2}}
+{"id":"purchase_004","text":"今天在苏宁买了一个空气炸锅，399 元，订单号 SN-39，15 天可退。","expected":{"intent":"create_record","record_type":"purchase","title":"空气炸锅","amount":399,"merchant":"苏宁","order_number":"SN-39","return_days":15}}
+{"id":"purchase_005","text":"我 2026-08-01 在天猫下单一台洗地机，2499 元，订单号 TM-XDJ-01，七天无理由。","expected":{"intent":"create_record","record_type":"purchase","title":"洗地机","amount":2499,"merchant":"天猫","order_number":"TM-XDJ-01","return_days":7}}
+{"id":"purchase_006","text":"昨天在京东买了一个鼠标，199 元，订单号 MOUSE-199，七天无理由，不用提醒。","expected":{"intent":"create_record","record_type":"purchase","title":"鼠标","amount":199,"merchant":"京东","order_number":"MOUSE-199","return_days":7}}
+{"id":"purchase_007","text":"我买了一个路由器，299 元，订单号 R-2026，七天退货，退货前三天提醒我。","expected":{"intent":"create_record","record_type":"purchase","title":"路由器","amount":299,"order_number":"R-2026","return_days":7,"remind_before_days":3}}
+{"id":"purchase_008","text":"在 Apple Store 买了一个 iPad，3999 元，订单号 APPLE-IPAD-01，14 天可退。","expected":{"intent":"create_record","record_type":"purchase","title":"iPad","amount":3999,"merchant":"Apple Store","order_number":"APPLE-IPAD-01","return_days":14}}
+{"id":"purchase_009","text":"我今天买了一个咖啡机，1599 元，七天无理由，提前两天提醒。","expected":{"intent":"create_record","record_type":"purchase","title":"咖啡机","amount":1599,"return_days":7,"remind_before_days":2}}
+{"id":"purchase_010","text":"2026-07-20 从小米有品购买了一个摄像头，249 元，订单号 MI-CAM，七天可退。","expected":{"intent":"create_record","record_type":"purchase","title":"摄像头","amount":249,"merchant":"小米有品","order_number":"MI-CAM","return_days":7}}
+{"id":"purchase_011","text":"昨天在亚马逊买了一个 Kindle，1099 元，订单号 AMZ-KINDLE，30 天可退，提前 5 天提醒。","expected":{"intent":"create_record","record_type":"purchase","title":"Kindle","amount":1099,"merchant":"亚马逊","order_number":"AMZ-KINDLE","return_days":30,"remind_before_days":5}}
+{"id":"purchase_012","text":"我下单了一个书桌，799 元，订单号 DESK-88，七天退货。","expected":{"intent":"create_record","record_type":"purchase","title":"书桌","amount":799,"order_number":"DESK-88","return_days":7}}
+{"id":"purchase_013","text":"今天在得物买了一双运动鞋，699 元，订单号 DW-SHOE，七天无理由。","expected":{"intent":"create_record","record_type":"purchase","title":"运动鞋","amount":699,"merchant":"得物","order_number":"DW-SHOE","return_days":7}}
+{"id":"purchase_014","text":"前天购买了一个蓝牙音箱，299 元，十五天可退，提前三天提醒我。","expected":{"intent":"create_record","record_type":"purchase","title":"蓝牙音箱","amount":299,"return_days":15,"remind_before_days":3}}
+{"id":"purchase_015","text":"我在京东买了一个电饭煲，499 元，订单号 RICE-2026，7 天无理由。","expected":{"intent":"create_record","record_type":"purchase","title":"电饭煲","amount":499,"merchant":"京东","order_number":"RICE-2026","return_days":7}}
+{"id":"subscription_001","text":"Netflix 会员每月 68 元，下个月 15 号自动续费，提前 3 天提醒我。","expected":{"intent":"create_record","record_type":"subscription","title":"Netflix","amount":68,"billing_cycle":"monthly","next_renewal_text":"下个月15号","auto_renew":true,"remind_before_days":3}}
+{"id":"subscription_002","text":"我订阅了腾讯视频会员，每月 30 元，每月 15 号自动续费，续费前 3 天提醒我。","expected":{"intent":"create_record","record_type":"subscription","title":"腾讯视频","amount":30,"billing_cycle":"monthly","next_renewal_text":"每月15号","auto_renew":true,"remind_before_days":3}}
+{"id":"subscription_003","text":"开通了 Notion 订阅，年付 700 元，每年 9 月 1 日续费，提前七天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"Notion","amount":700,"billing_cycle":"yearly","next_renewal_text":"每年9月1日","remind_before_days":7}}
+{"id":"subscription_004","text":"Spotify 会员每月 18 元，2026-08-20 自动扣款，提前两天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"Spotify","amount":18,"billing_cycle":"monthly","next_renewal_text":"2026-08-20","auto_renew":true,"remind_before_days":2}}
+{"id":"subscription_005","text":"我买了 Apple Music 会员，月付 11 元，20 号自动续费。","expected":{"intent":"create_record","record_type":"subscription","title":"Apple Music","amount":11,"billing_cycle":"monthly","next_renewal_text":"20号自动续费","auto_renew":true}}
+{"id":"subscription_006","text":"GitHub Copilot 年度订阅 100 美元，明年 7 月 15 日续费，提前 10 天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"GitHub Copilot","amount":100,"billing_cycle":"yearly","next_renewal_text":"明年7月15日","remind_before_days":10}}
+{"id":"subscription_007","text":"开通了 B 站大会员，每年 168 元，每年 6 月 18 日自动续费。","expected":{"intent":"create_record","record_type":"subscription","title":"B 站大","amount":168,"billing_cycle":"yearly","next_renewal_text":"每年6月18日","auto_renew":true}}
+{"id":"subscription_008","text":"我订阅了 WPS 会员，包年 89 元，2026-12-31 到期，提前 7 天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"WPS","amount":89,"billing_cycle":"yearly","next_renewal_text":"2026-12-31","remind_before_days":7}}
+{"id":"subscription_009","text":"优酷会员月费 25 元，每月 8 号自动扣款。","expected":{"intent":"create_record","record_type":"subscription","title":"优酷","amount":25,"billing_cycle":"monthly","next_renewal_text":"每月8号","auto_renew":true}}
+{"id":"subscription_010","text":"我开通了 ChatGPT Plus，每月 20 美元，下个月 3 号扣款，提前 1 天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"ChatGPT Plus","amount":20,"billing_cycle":"monthly","next_renewal_text":"下个月3号","remind_before_days":1}}
+{"id":"subscription_011","text":"Dropbox 订阅年费 120 元，每年 10 月 10 日续费，不自动续费。","expected":{"intent":"create_record","record_type":"subscription","title":"Dropbox","amount":120,"billing_cycle":"yearly","next_renewal_text":"每年10月10日","auto_renew":false}}
+{"id":"subscription_012","text":"爱奇艺会员每月 22 元，每月 28 号续费，续费前两天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"爱奇艺","amount":22,"billing_cycle":"monthly","next_renewal_text":"每月28号","remind_before_days":2}}
+{"id":"subscription_013","text":"我昨天开通了飞书会员，月付 50 元，自动续费。","expected":{"intent":"create_record","record_type":"subscription","title":"飞书","amount":50,"billing_cycle":"monthly","auto_renew":true,"event_date_text":"昨天"}}
+{"id":"subscription_014","text":"Zoom 订阅每周 30 元，每周三续费，提前一天提醒。","expected":{"intent":"create_record","record_type":"subscription","title":"Zoom","amount":30,"billing_cycle":"weekly","next_renewal_text":"每周三","remind_before_days":1}}
+{"id":"subscription_015","text":"我续费了 Adobe 订阅，年度 888 元，7 月 1 日每年扣款。","expected":{"intent":"create_record","record_type":"subscription","title":"Adobe","amount":888,"billing_cycle":"yearly","next_renewal_text":"7月1日每年扣款"}}
+{"id":"bill_001","text":"这个月房租 4500 元，月底前缴费，提前两天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"房租","amount":4500,"billing_period":"monthly","due_date_text":"月底","remind_before_days":2}}
+{"id":"bill_002","text":"水电费 320 元，8 月 10 日缴费，提前 3 天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"水电费","amount":320,"due_date_text":"8月10日","remind_before_days":3}}
+{"id":"bill_003","text":"信用卡账单 12000 元，2026-08-05 截止，提前五天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"信用卡","amount":12000,"due_date_text":"2026-08-05","remind_before_days":5}}
+{"id":"bill_004","text":"宽带账单 199 元，下个月 1 号缴费。","expected":{"intent":"create_record","record_type":"bill","title":"宽带","amount":199,"due_date_text":"下个月1号"}}
+{"id":"bill_005","text":"物业费 880 元，月底缴费，提醒我提前 2 天。","expected":{"intent":"create_record","record_type":"bill","title":"物业费","amount":880,"due_date_text":"月底","remind_before_days":2}}
+{"id":"bill_006","text":"燃气费 86 元，明天缴费。","expected":{"intent":"create_record","record_type":"bill","title":"燃气费","amount":86,"due_date_text":"明天"}}
+{"id":"bill_007","text":"车位管理费 300 元，2026 年 9 月 30 日截止。","expected":{"intent":"create_record","record_type":"bill","title":"车位管理费","amount":300,"due_date_text":"2026年9月30日"}}
+{"id":"bill_008","text":"手机话费账单 128 元，后天缴费，提前一天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"手机话费","amount":128,"due_date_text":"后天","remind_before_days":1}}
+{"id":"bill_009","text":"医保缴费 380 元，12 月 31 日截止，提前 10 天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"医保","amount":380,"due_date_text":"12月31日","remind_before_days":10}}
+{"id":"bill_010","text":"学费账单 6000 元，9 月 1 日前缴费。","expected":{"intent":"create_record","record_type":"bill","title":"学费","amount":6000,"due_date_text":"9月1日"}}
+{"id":"bill_011","text":"房贷这个月 8200 元，月底前还款，提前三天提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"房贷","amount":8200,"due_date_text":"月底","remind_before_days":3}}
+{"id":"bill_012","text":"花呗账单 2300 元，下周五还款，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"花呗","amount":2300,"due_date_text":"下周五","remind_before_days":2}}
+{"id":"bill_013","text":"停车费 60 元，今天截止。","expected":{"intent":"create_record","record_type":"bill","title":"停车费","amount":60,"due_date_text":"今天"}}
+{"id":"bill_014","text":"健身房尾款 1200 元，三天后缴费。","expected":{"intent":"create_record","record_type":"bill","title":"健身房尾款","amount":1200,"due_date_text":"三天后"}}
+{"id":"bill_015","text":"保险账单 3999 元，明年 1 月 15 日截止，提前 7 天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"保险","amount":3999,"due_date_text":"明年1月15日","remind_before_days":7}}
+{"id":"search_001","text":"查一下耳机订单","expected":{"intent":"search_records","record_type":"purchase","search_query":"耳机"}}
+{"id":"search_002","text":"查询 Netflix 会员","expected":{"intent":"search_records","record_type":"subscription","search_query":"Netflix"}}
+{"id":"search_003","text":"找一下房租账单","expected":{"intent":"search_records","record_type":"bill","search_query":"房租"}}
+{"id":"search_004","text":"有没有信用卡账单记录","expected":{"intent":"search_records","record_type":"bill","search_query":"信用卡"}}
+{"id":"search_005","text":"哪些会员快续费了","expected":{"intent":"search_records","record_type":"subscription"}}
+{"id":"search_006","text":"搜索京东订单","expected":{"intent":"search_records","record_type":"purchase","search_query":"京东"}}
+{"id":"search_007","text":"列出所有订阅服务","expected":{"intent":"search_records","record_type":"subscription"}}
+{"id":"search_008","text":"查找水电费","expected":{"intent":"search_records","record_type":"bill","search_query":"水电费"}}
+{"id":"search_009","text":"显示一下路由器记录","expected":{"intent":"search_records","search_query":"路由器"}}
+{"id":"search_010","text":"找一下自动续费的会员","expected":{"intent":"search_records","record_type":"subscription"}}
+{"id":"missing_001","text":"我昨天在京东买了一个耳机，七天无理由，退货前两天提醒我。","expected":{"intent":"create_record","record_type":"purchase","title":"耳机","merchant":"京东","return_days":7,"remind_before_days":2}}
+{"id":"missing_002","text":"我订阅了一个会员，每月 30 元，自动续费。","expected":{"intent":"create_record","record_type":"subscription","amount":30,"billing_cycle":"monthly","auto_renew":true}}
+{"id":"missing_003","text":"房租月底前缴费，提前两天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"房租","due_date_text":"月底","remind_before_days":2}}
+{"id":"missing_004","text":"我买了一个键盘，订单号 K-001，七天无理由。","expected":{"intent":"create_record","record_type":"purchase","title":"键盘","order_number":"K-001","return_days":7}}
+{"id":"missing_005","text":"宽带下个月 1 号缴费，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"宽带","due_date_text":"下个月1号","remind_before_days":2}}
