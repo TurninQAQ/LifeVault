@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -49,11 +50,31 @@ def parse_date_text(text: str | None, timezone_name: str, now: datetime | None =
         return None
     base = now or now_in_timezone(timezone_name)
     today = base.date()
-    raw = text.strip()
+    raw = _compact_date_text(text)
 
     exact = _parse_exact_date(raw, today.year)
     if exact:
         return exact
+
+    next_month_day = _parse_next_month_day(raw, today)
+    if next_month_day:
+        return next_month_day
+
+    next_year_day = _parse_next_year_day(raw, today)
+    if next_year_day:
+        return next_year_day
+
+    monthly_anchor = _parse_monthly_anchor(raw, today)
+    if monthly_anchor:
+        return monthly_anchor
+
+    yearly_anchor = _parse_yearly_anchor(raw, today)
+    if yearly_anchor:
+        return yearly_anchor
+
+    weekly_anchor = _parse_weekly_anchor(raw, today)
+    if weekly_anchor:
+        return weekly_anchor
 
     relative_days = {
         "今天": 0,
@@ -97,6 +118,54 @@ def parse_date_text(text: str | None, timezone_name: str, now: datetime | None =
     return None
 
 
+def parse_subscription_renewal_date(
+    text: str | None,
+    billing_cycle: str | None,
+    timezone_name: str,
+    now: datetime | None = None,
+) -> date | None:
+    if not text:
+        return None
+    base = now or now_in_timezone(timezone_name)
+    today = base.date()
+    raw = _compact_date_text(text)
+    cycle = normalize_billing_cycle(billing_cycle)
+
+    if cycle == "monthly":
+        day_only = _parse_day_only(raw)
+        if day_only is not None:
+            return _date_for_month_anchor(today, day_only)
+
+    parsed = parse_date_text(raw, timezone_name, base)
+    if parsed and parsed < today and _looks_like_month_day_without_year(raw):
+        return _next_year_date_for_anchor(today, parsed.month, parsed.day)
+    return parsed
+
+
+def calculate_next_renewal_date(
+    anchor_date: date,
+    billing_cycle: str | None,
+    today: date | None = None,
+) -> date | None:
+    cycle = normalize_billing_cycle(billing_cycle)
+    if cycle is None:
+        return None
+    minimum = today or date.today()
+    candidate = _advance_cycle(anchor_date, cycle)
+    while candidate < minimum:
+        candidate = _advance_cycle(candidate, cycle)
+    return candidate
+
+
+def normalize_billing_cycle(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"monthly", "yearly", "weekly"}:
+        return normalized
+    return None
+
+
 def calculate_deadline(event_date: date, days: int) -> date:
     if days < 0:
         raise ValueError("days must be non-negative")
@@ -121,7 +190,8 @@ def calculate_reminder_at(
 
 
 def _parse_exact_date(raw: str, default_year: int) -> date | None:
-    normalized = raw.replace("年", "-").replace("月", "-").replace("日", "")
+    normalized = _compact_date_text(raw)
+    normalized = normalized.replace("年", "-").replace("月", "-").replace("日", "").replace("号", "")
     normalized = normalized.replace("/", "-").replace(".", "-")
     for pattern in ("%Y-%m-%d", "%Y-%m", "%m-%d"):
         try:
@@ -135,6 +205,140 @@ def _parse_exact_date(raw: str, default_year: int) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _compact_date_text(raw: str) -> str:
+    return re.sub(r"\s+", "", raw.strip())
+
+
+def _parse_next_month_day(raw: str, today: date) -> date | None:
+    match = re.search(r"(?:下个?月|下月)([一二两三四五六七八九十\d]+)[日号]", raw)
+    if not match:
+        return None
+    day = _parse_day(match.group(1))
+    if day is None:
+        return None
+    next_month = _add_months(today.replace(day=1), 1)
+    return _safe_date(next_month.year, next_month.month, day)
+
+
+def _parse_next_year_day(raw: str, today: date) -> date | None:
+    match = re.search(r"(?:明年|下年|下一年)([一二两三四五六七八九十\d]+)月([一二两三四五六七八九十\d]+)[日号]", raw)
+    if not match:
+        return None
+    month = _parse_month(match.group(1))
+    day = _parse_day(match.group(2))
+    if month is None or day is None:
+        return None
+    return _safe_date(today.year + 1, month, day)
+
+
+def _parse_monthly_anchor(raw: str, today: date) -> date | None:
+    patterns = [
+        r"(?:每个?月|月付|包月|月度|按月).*?([一二两三四五六七八九十\d]+)[日号]",
+        r"([一二两三四五六七八九十\d]+)[日号].*?(?:每个?月|月付|包月|月度|按月|自动续费|自动扣款|扣款|续费)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if match:
+            day = _parse_day(match.group(1))
+            return _date_for_month_anchor(today, day) if day is not None else None
+    return None
+
+
+def _parse_yearly_anchor(raw: str, today: date) -> date | None:
+    patterns = [
+        r"(?:每年|每一年|年付|包年|年度|按年).*?([一二两三四五六七八九十\d]+)月([一二两三四五六七八九十\d]+)[日号]",
+        r"([一二两三四五六七八九十\d]+)月([一二两三四五六七八九十\d]+)[日号].*?(?:每年|每一年|年付|包年|年度|按年)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if match:
+            month = _parse_month(match.group(1))
+            day = _parse_day(match.group(2))
+            if month is None or day is None:
+                return None
+            return _date_for_year_anchor(today, month, day)
+    return None
+
+
+def _parse_weekly_anchor(raw: str, today: date) -> date | None:
+    if "每周" not in raw and "每星期" not in raw:
+        return None
+    weekday = _parse_weekday(raw)
+    if weekday is None:
+        return None
+    return today + timedelta(days=(weekday - today.weekday()) % 7)
+
+
+def _date_for_month_anchor(today: date, day: int) -> date | None:
+    current = _safe_date(today.year, today.month, day)
+    if current and current >= today:
+        return current
+    next_month = _add_months(today.replace(day=1), 1)
+    return _safe_date(next_month.year, next_month.month, day)
+
+
+def _date_for_year_anchor(today: date, month: int, day: int) -> date | None:
+    current = _safe_date(today.year, month, day)
+    if current and current >= today:
+        return current
+    return _safe_date(today.year + 1, month, day)
+
+
+def _next_year_date_for_anchor(today: date, month: int, day: int) -> date | None:
+    current = _safe_date(today.year, month, day)
+    if current and current >= today:
+        return current
+    return _safe_date(today.year + 1, month, day)
+
+
+def _parse_day_only(raw: str) -> int | None:
+    match = re.fullmatch(r"([一二两三四五六七八九十\d]+)[日号]", raw)
+    return _parse_day(match.group(1)) if match else None
+
+
+def _looks_like_month_day_without_year(raw: str) -> bool:
+    return bool(re.fullmatch(r"[一二两三四五六七八九十\d]+月[一二两三四五六七八九十\d]+[日号]?", raw))
+
+
+def _parse_day(raw: str) -> int | None:
+    value = parse_int(raw)
+    if value is None or not 1 <= value <= 31:
+        return None
+    return value
+
+
+def _parse_month(raw: str) -> int | None:
+    value = parse_int(raw)
+    if value is None or not 1 <= value <= 12:
+        return None
+    return value
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _advance_cycle(value: date, cycle: str) -> date:
+    if cycle == "weekly":
+        return value + timedelta(days=7)
+    if cycle == "monthly":
+        return _add_months(value, 1)
+    if cycle == "yearly":
+        return _add_months(value, 12)
+    raise ValueError(f"Unsupported billing cycle: {cycle}")
+
+
+def _add_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def _parse_time(raw: str) -> tuple[int, int]:

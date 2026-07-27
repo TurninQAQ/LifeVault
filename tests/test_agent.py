@@ -26,6 +26,28 @@ class AgentTest(unittest.TestCase):
             self.assertIsNotNone(result.record.id)
             self.assertIsNotNone(result.reminder)
 
+    def test_fallback_subscription_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(
+                database_path=Path(tmp) / "test.db",
+                use_qwen=False,
+            )
+            repo = VaultRepository(settings.database_path)
+            agent = LifeVaultAgent(settings, repo)
+            draft = agent.create_draft("我订阅了腾讯视频会员，每月 30 元，2026-08-15 自动续费，续费前 3 天提醒我。")
+
+            self.assertTrue(draft.is_ready_to_save, draft.missing_fields)
+            self.assertEqual(draft.record.record_type.value, "subscription")
+            self.assertEqual(draft.record.title, "腾讯视频")
+            self.assertEqual(draft.record.deadline.isoformat(), "2026-08-15")
+            self.assertEqual(draft.record.details["service_name"], "腾讯视频")
+            self.assertEqual(draft.record.details["billing_cycle"], "monthly")
+            self.assertTrue(draft.record.details["auto_renew"])
+            self.assertEqual(draft.record.details["renewal_anchor_day"], 15)
+            self.assertEqual(draft.record.details["remind_before_days"], 3)
+            self.assertEqual(draft.reminder.reminder_type.value, "renewal")
+            self.assertEqual(draft.reminder.scheduled_at.isoformat(), "2026-08-12T09:00:00+08:00")
+
 
 if __name__ == "__main__":
     unittest.main()

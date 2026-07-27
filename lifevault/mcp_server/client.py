@@ -38,6 +38,14 @@ class PersonalVaultMcpClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def list_upcoming_subscriptions(
+        self,
+        days: int = 30,
+        include_auto_renew: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        ...
+
 
 class InProcessPersonalVaultMcpClient:
     """Synchronous client facade over the in-process FastMCP server."""
@@ -89,6 +97,21 @@ class InProcessPersonalVaultMcpClient:
                 "user_confirmed": user_confirmed,
                 "message": message,
                 "parent_id": parent_id,
+            },
+        )
+
+    def list_upcoming_subscriptions(
+        self,
+        days: int = 30,
+        include_auto_renew: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "list_upcoming_subscriptions",
+            {
+                "days": days,
+                "include_auto_renew": include_auto_renew,
+                "limit": limit,
             },
         )
 

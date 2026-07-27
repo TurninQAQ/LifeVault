@@ -68,6 +68,37 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                 require_ok("save_record", save_result)
                 record_id = save_result["record"]["id"]
 
+                subscription_payload = {
+                    "record_type": "subscription",
+                    "title": f"MCP 测试会员 {run_id}",
+                    "amount": 30.0,
+                    "currency": "CNY",
+                    "deadline": "2099-08-15",
+                    "details": {
+                        "service_name": f"MCP 测试会员 {run_id}",
+                        "billing_cycle": "monthly",
+                        "auto_renew": True,
+                        "renewal_anchor_day": 15,
+                    },
+                    "notes": "stdio smoke subscription",
+                }
+                subscription_save = await call_json(
+                    session,
+                    "save_record",
+                    {
+                        "record": subscription_payload,
+                        "idempotency_key": f"mcp-smoke-subscription-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("save_record subscription", subscription_save)
+                upcoming_subscriptions = await call_json(
+                    session,
+                    "list_upcoming_subscriptions",
+                    {"days": 30000, "include_auto_renew": True, "limit": 10},
+                )
+                require_ok("list_upcoming_subscriptions", upcoming_subscriptions)
+
                 search_result = await call_json(session, "search_records", {"query": record_payload["title"]})
                 require_ok("search_records", search_result)
                 get_result = await call_json(session, "get_record", {"record_id": record_id})
@@ -148,6 +179,7 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "database_path": str(database_path),
                     "tools": tool_names,
                     "record_id": record_id,
+                    "upcoming_subscription_count": len(upcoming_subscriptions["records"]),
                     "search_count": len(search_result["records"]),
                     "get_record_title": get_result["record"]["title"],
                     "duplicate_count": len(duplicate_result["duplicate_candidates"]),

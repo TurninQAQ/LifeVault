@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +16,7 @@ from lifevault.models.schemas import (
     ReminderType,
 )
 from lifevault.storage.repository import VaultRepository
+from lifevault.tools.date_tools import now_in_timezone
 from lifevault.tools.idempotency import stable_key
 
 
@@ -74,6 +75,29 @@ def create_server(
             return _ok(records=[_model(record) for record in records])
         except (ValidationError, ValueError) as exc:
             return _fail("search_records_failed", str(exc))
+
+    @mcp.tool(description="List subscription records whose renewal deadline is coming soon.")
+    def list_upcoming_subscriptions(
+        days: int = 30,
+        include_auto_renew: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        try:
+            date_from = now_in_timezone(active_settings.default_timezone).date()
+            records = repo.list_upcoming_subscriptions(
+                user_id,
+                date_from=date_from,
+                days=days,
+                include_auto_renew=include_auto_renew,
+                limit=limit,
+            )
+            return _ok(
+                records=[_model(record) for record in records],
+                date_from=date_from.isoformat(),
+                date_to=(date_from + timedelta(days=days)).isoformat(),
+            )
+        except (ValidationError, ValueError) as exc:
+            return _fail("list_upcoming_subscriptions_failed", str(exc))
 
     @mcp.tool(description="Get one saved life record by id.")
     def get_record(record_id: str) -> dict[str, Any]:

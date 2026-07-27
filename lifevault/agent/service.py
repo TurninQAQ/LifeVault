@@ -21,7 +21,15 @@ from lifevault.models.schemas import (
     SaveResult,
 )
 from lifevault.storage.repository import VaultRepository
-from lifevault.tools.date_tools import calculate_deadline, calculate_reminder_at, now_in_timezone, parse_date_text
+from lifevault.tools.date_tools import (
+    calculate_deadline,
+    calculate_next_renewal_date,
+    calculate_reminder_at,
+    normalize_billing_cycle,
+    now_in_timezone,
+    parse_date_text,
+    parse_subscription_renewal_date,
+)
 from lifevault.tools.idempotency import stable_key
 
 
@@ -156,11 +164,7 @@ class LifeVaultAgent:
             if candidate.return_days is None and not candidate.deadline_date and not candidate.deadline_text:
                 missing.append("return_days_or_deadline")
         elif candidate.record_type == RecordType.SUBSCRIPTION:
-            renewal = candidate.deadline_date or parse_date_text(
-                candidate.next_renewal_text or candidate.deadline_text,
-                self.settings.default_timezone,
-                now,
-            )
+            renewal, _source = self._subscription_renewal_date(candidate, now)
             if not renewal:
                 missing.append("next_renewal_date")
         elif candidate.record_type == RecordType.BILL:
@@ -202,17 +206,19 @@ class LifeVaultAgent:
             if not deadline and event_date and candidate.return_days is not None:
                 deadline = calculate_deadline(event_date, candidate.return_days)
         elif candidate.record_type == RecordType.SUBSCRIPTION:
+            deadline, renewal_source = self._subscription_renewal_date(candidate, now)
+            cycle = normalize_billing_cycle(candidate.billing_cycle)
+            remind_before_days = candidate.remind_before_days
+            if remind_before_days is None:
+                remind_before_days = self.repository.get_preferences(self.settings.default_user_id).default_advance_days
             details = {
                 "service_name": candidate.service_name or title,
-                "billing_cycle": candidate.billing_cycle,
+                "billing_cycle": cycle,
                 "auto_renew": candidate.auto_renew,
+                "renewal_anchor_day": self._renewal_anchor_day(deadline, cycle),
+                "next_renewal_source": renewal_source,
+                "remind_before_days": remind_before_days,
             }
-            if not deadline:
-                deadline = parse_date_text(
-                    candidate.next_renewal_text or candidate.deadline_text,
-                    self.settings.default_timezone,
-                    now,
-                )
         elif candidate.record_type == RecordType.BILL:
             details = {
                 "bill_name": candidate.bill_name or title,
@@ -287,3 +293,54 @@ class LifeVaultAgent:
             amount = f"{record.amount:g} {record.currency}" if record.amount is not None else "金额未知"
             lines.append(f"- {record.title}：{amount}，状态 {record.status.value}，截止 {deadline}")
         return "\n".join(lines)
+
+    def _subscription_renewal_date(
+        self,
+        candidate: ExtractedRecordCandidate,
+        now: datetime,
+    ) -> tuple[date | None, str | None]:
+        if candidate.deadline_date:
+            return candidate.deadline_date, "deadline_date"
+
+        cycle = normalize_billing_cycle(candidate.billing_cycle)
+        if candidate.next_renewal_text:
+            renewal = parse_subscription_renewal_date(
+                candidate.next_renewal_text,
+                cycle,
+                self.settings.default_timezone,
+                now,
+            )
+            if renewal:
+                return renewal, "next_renewal_text"
+
+        if candidate.deadline_text:
+            renewal = parse_subscription_renewal_date(
+                candidate.deadline_text,
+                cycle,
+                self.settings.default_timezone,
+                now,
+            )
+            if renewal:
+                return renewal, "deadline_text"
+
+        event_date = candidate.event_date or parse_date_text(
+            candidate.event_date_text,
+            self.settings.default_timezone,
+            now,
+        )
+        if event_date and cycle:
+            renewal = calculate_next_renewal_date(event_date, cycle, today=now.date())
+            if renewal:
+                source = "event_date_text+billing_cycle" if candidate.event_date_text else "event_date+billing_cycle"
+                return renewal, source
+
+        return None, None
+
+    def _renewal_anchor_day(self, renewal: date | None, billing_cycle: str | None) -> int | str | None:
+        if not renewal or not billing_cycle:
+            return None
+        if billing_cycle == "weekly":
+            return renewal.weekday()
+        if billing_cycle == "yearly":
+            return f"{renewal.month:02d}-{renewal.day:02d}"
+        return renewal.day

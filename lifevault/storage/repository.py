@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -201,6 +201,46 @@ class VaultRepository:
         with connect(self.database_path) as conn:
             rows = conn.execute(sql, params).fetchall()
             return [self._row_to_record(row) for row in rows]
+
+    def list_upcoming_subscriptions(
+        self,
+        user_id: str,
+        date_from: date,
+        days: int = 30,
+        include_auto_renew: bool = True,
+        limit: int = 20,
+    ) -> list[LifeRecord]:
+        if days < 0:
+            raise ValueError("days must be non-negative.")
+        if limit <= 0:
+            raise ValueError("limit must be positive.")
+
+        date_to = date_from + timedelta(days=days)
+        with connect(self.database_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM life_records
+                WHERE user_id = ?
+                  AND type = ?
+                  AND status != ?
+                  AND deadline IS NOT NULL
+                  AND deadline >= ?
+                  AND deadline <= ?
+                ORDER BY deadline ASC, created_at ASC
+                """,
+                (
+                    user_id,
+                    RecordType.SUBSCRIPTION.value,
+                    RecordStatus.CANCELLED.value,
+                    date_from.isoformat(),
+                    date_to.isoformat(),
+                ),
+            ).fetchall()
+
+        records = [self._row_to_record(row) for row in rows]
+        if not include_auto_renew:
+            records = [record for record in records if record.details.get("auto_renew") is not True]
+        return records[:limit]
 
     def find_duplicate(
         self,

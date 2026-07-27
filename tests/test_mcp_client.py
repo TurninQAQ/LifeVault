@@ -58,6 +58,30 @@ class McpClientTest(unittest.TestCase):
             self.assertTrue(reminder["ok"])
             self.assertEqual(reminder["reminder"]["record_id"], record_id)
 
+    def test_in_process_client_lists_upcoming_subscriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(database_path=Path(tmp) / "mcp-client.db", use_qwen=False)
+            repo = VaultRepository(settings.database_path)
+            client = InProcessPersonalVaultMcpClient(settings, repo)
+
+            saved = client.save_record(
+                {
+                    "record_type": "subscription",
+                    "title": "MCP Client 会员",
+                    "amount": 30.0,
+                    "deadline": "2099-08-15",
+                    "details": {"billing_cycle": "monthly", "auto_renew": True},
+                },
+                "client-subscription",
+                user_confirmed=True,
+            )
+            self.assertTrue(saved["ok"])
+
+            upcoming = client.list_upcoming_subscriptions(days=30000, limit=5)
+            self.assertTrue(upcoming["ok"])
+            self.assertEqual(len(upcoming["records"]), 1)
+            self.assertEqual(upcoming["records"][0]["title"], "MCP Client 会员")
+
 
 if __name__ == "__main__":
     unittest.main()

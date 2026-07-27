@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.4 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.5 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -13,6 +13,14 @@ natural language -> Qwen/fallback extraction -> LangGraph interrupts
 ```
 
 The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
+
+v0.5 adds a focused subscription renewal loop:
+
+- Natural-language subscription capture for service name, amount, billing cycle, auto-renew state, renewal date, and reminder offset.
+- Deterministic renewal parsing for exact dates, relative dates, `每月X号`, `下个月X号`, `每年X月X日`, `明年X月X日`, and weekly anchors.
+- Subscription records store the next renewal date in `deadline` and subscription metadata in `details`.
+- Renewal reminders use `reminder_type=renewal`.
+- MCP and CLI can list upcoming subscription renewals.
 
 Create-record interrupts:
 
@@ -52,7 +60,9 @@ python3 -m lifevault.cli init-db
 
 ```bash
 python -m lifevault.cli add "我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。" --yes
+python -m lifevault.cli add "我订阅了腾讯视频会员，每月 30 元，每月 15 号自动续费，续费前 3 天提醒我。" --yes
 python -m lifevault.cli list
+python -m lifevault.cli subscriptions --days 30
 python -m lifevault.cli reminders
 python -m lifevault.cli worker --once
 ```
@@ -91,6 +101,7 @@ MCP tools:
 ```text
 save_record
 search_records
+list_upcoming_subscriptions
 get_record
 find_duplicate
 update_record_status
@@ -100,7 +111,7 @@ snooze_reminder
 cancel_reminder
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation; the stdio MCP server remains available for external clients and integration smoke tests.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, reminder creation, and upcoming subscription queries; the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 

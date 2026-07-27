@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
-from lifevault.models.schemas import LifeRecordCreate, RecordType, ReminderCreate, ReminderStatus, ReminderType
+from lifevault.models.schemas import LifeRecordCreate, RecordStatus, RecordType, ReminderCreate, ReminderStatus, ReminderType
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import calculate_reminder_at, parse_date_text
 
@@ -74,6 +74,66 @@ class RepositoryTest(unittest.TestCase):
 
             cancelled = repo.cancel_reminder("local", child.id, user_confirmed=True)
             self.assertEqual(cancelled.status, ReminderStatus.CANCELLED)
+
+    def test_list_upcoming_subscriptions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = VaultRepository(Path(tmp) / "test.db")
+            repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.SUBSCRIPTION,
+                    title="腾讯视频",
+                    amount=30,
+                    deadline=date(2026, 8, 15),
+                    details={"billing_cycle": "monthly", "auto_renew": True},
+                ),
+                "subscription-auto",
+            )
+            repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.SUBSCRIPTION,
+                    title="手动会员",
+                    amount=20,
+                    deadline=date(2026, 8, 20),
+                    details={"billing_cycle": "monthly", "auto_renew": False},
+                ),
+                "subscription-manual",
+            )
+            repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.SUBSCRIPTION,
+                    title="过远会员",
+                    amount=100,
+                    deadline=date(2026, 12, 1),
+                    details={"billing_cycle": "yearly", "auto_renew": True},
+                ),
+                "subscription-far",
+            )
+            repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.SUBSCRIPTION,
+                    title="已取消会员",
+                    amount=10,
+                    deadline=date(2026, 8, 10),
+                    status=RecordStatus.CANCELLED,
+                    details={"billing_cycle": "monthly", "auto_renew": False},
+                ),
+                "subscription-cancelled",
+            )
+
+            all_upcoming = repo.list_upcoming_subscriptions("local", date_from=date(2026, 7, 27), days=30)
+            self.assertEqual([record.title for record in all_upcoming], ["腾讯视频", "手动会员"])
+
+            manual_only = repo.list_upcoming_subscriptions(
+                "local",
+                date_from=date(2026, 7, 27),
+                days=30,
+                include_auto_renew=False,
+            )
+            self.assertEqual([record.title for record in manual_only], ["手动会员"])
 
 
 if __name__ == "__main__":

@@ -68,7 +68,11 @@ class FallbackExtractor:
             "record_type": record_type,
             "title": _extract_title(text, record_type),
             "amount": amount,
-            "event_date_text": _extract_event_date_text(text),
+            "event_date_text": (
+                _extract_subscription_event_date_text(text)
+                if record_type == RecordType.SUBSCRIPTION
+                else _extract_event_date_text(text)
+            ),
             "reminder_requested": reminder_requested,
             "remind_before_days": remind_before_days,
             "tool_plan": [
@@ -93,8 +97,8 @@ class FallbackExtractor:
                 {
                     "service_name": title,
                     "billing_cycle": _extract_billing_cycle(text),
-                    "auto_renew": "自动续费" in text or "自动扣款" in text,
-                    "next_renewal_text": _extract_due_text(text),
+                    "auto_renew": _extract_auto_renew(text),
+                    "next_renewal_text": _extract_subscription_renewal_text(text),
                 }
             )
         elif record_type == RecordType.BILL:
@@ -165,6 +169,9 @@ def build_extraction_prompt(text: str, now: datetime) -> str:
 - 相对日期保留在 *_text 字段，由工具解析。
 - 截止日期不要自行计算，除非用户明确给出具体截止日期。
 - 用户只是查询时，intent=search_records，search_query 填关键词。
+- 订阅/会员的 billing_cycle 只填 monthly/yearly/weekly/unknown/null。
+- 订阅/会员的 next_renewal_text 保留续费日期或规则原文，例如 2026-08-15、下个月15号、每月15号、每年7月15日。
+- 订阅/会员如果只有开通日期或上次付款日期，填 event_date_text，不要把开通日期当成 next_renewal_text。
 
 用户输入：
 {text}
@@ -206,11 +213,63 @@ def _extract_event_date_text(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _extract_subscription_event_date_text(text: str) -> str | None:
+    for token in ["前天", "昨天", "今天", "明天", "后天"]:
+        if re.search(rf"{token}.*?(?:订阅|开通|购买|买了|付款|付费)", text):
+            return token
+
+    match = re.search(
+        r"(?:上次(?:付款|扣款|续费)|开通(?:日期|时间)?|订阅(?:日期|时间)?)(?:是|在|到)?\s*"
+        r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日号]?|\d{1,2}月\d{1,2}[日号]|\d{1,2}-\d{1,2})",
+        text,
+    )
+    if match:
+        return match.group(1)
+
+    match = re.search(
+        r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日号]?|\d{1,2}月\d{1,2}[日号]|\d{1,2}-\d{1,2})"
+        r".*?(?:订阅|开通|购买|买了|付款|付费)",
+        text,
+    )
+    return match.group(1) if match else None
+
+
 def _extract_due_text(text: str) -> str | None:
-    match = re.search(r"(?:截止|到期|续费|缴费|扣款)(?:日|日期|时间)?(?:是|在|到)?\s*([^，,。；;\s]+)", text)
+    match = re.search(r"(?:截止|到期|续费|缴费|扣款)(?!前)(?:日|日期|时间)?(?:是|在|到)?\s*([^，,。；;\s]+)", text)
     if match:
         return match.group(1)
     return _extract_event_date_text(text)
+
+
+def _extract_subscription_renewal_text(text: str) -> str | None:
+    patterns = [
+        r"((?:每个?月|月付|包月|月度|按月)\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"([一二两三四五六七八九十\d]+\s*[日号]\s*(?:自动续费|自动扣款|扣款|续费))",
+        r"((?:下个?月|下月)\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"((?:每年|每一年|年付|包年|年度|按年)\s*[一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"((?:明年|下年|下一年)\s*[一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"((?:每周|每星期)[一二三四五六日天])",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return re.sub(r"\s+", "", match.group(1))
+
+    date_expr = (
+        r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日号]?"
+        r"|\d{1,2}月\d{1,2}[日号]"
+        r"|\d{1,2}-\d{1,2}"
+        r"|今天|明天|后天|[一二两三四五六七八九十\d]+天后"
+    )
+    match = re.search(rf"(?:到期|续费|扣款)(?!前)(?:日|日期|时间)?(?:是|在|到)?\s*({date_expr})", text)
+    if match:
+        return re.sub(r"\s+", "", match.group(1))
+
+    match = re.search(rf"({date_expr}).*?(?:到期|续费|扣款)(?!前)", text)
+    if match:
+        return re.sub(r"\s+", "", match.group(1))
+
+    return None
 
 
 def _extract_remind_before_days(text: str) -> int | None:
@@ -246,22 +305,44 @@ def _extract_title(text: str, record_type: RecordType) -> str | None:
             r"下单(?:了)?(?:一个|一台|一件|一份)?([^，,。；;\s]+)",
         ]
     elif record_type == RecordType.SUBSCRIPTION:
-        patterns = [r"([^，,。；;\s]+)(?:会员|订阅|自动续费|续费)"]
+        patterns = [
+            r"(?:订阅了|订阅|开通了|开通|购买了|买了|续费了|续费)\s*([^，,。；;\s]+)",
+            r"([^，,。；;\s]+?)(?:会员|订阅)",
+        ]
     else:
         patterns = [r"([^，,。；;\s]+)(?:账单|房租|水电费|信用卡|缴费)"]
 
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            return match.group(1)
+            title = match.group(1)
+            if record_type == RecordType.SUBSCRIPTION:
+                title = _clean_subscription_title(title)
+            return title or None
     return None
 
 
 def _extract_billing_cycle(text: str) -> str | None:
-    if any(keyword in text for keyword in ["每月", "月付", "包月", "月度"]):
+    if any(keyword in text for keyword in ["每月", "每个月", "月付", "月费", "包月", "月度", "按月"]):
         return "monthly"
-    if any(keyword in text for keyword in ["每年", "年付", "包年", "年度"]):
+    if any(keyword in text for keyword in ["每年", "每一年", "年付", "年费", "包年", "年度", "按年"]):
         return "yearly"
-    if any(keyword in text for keyword in ["每周", "周付"]):
+    if any(keyword in text for keyword in ["每周", "每星期", "周付", "周费", "按周"]):
         return "weekly"
     return None
+
+
+def _extract_auto_renew(text: str) -> bool | None:
+    if any(keyword in text for keyword in ["不自动续费", "不会自动续费", "无需自动续费", "手动续费", "不自动扣款"]):
+        return False
+    if any(keyword in text for keyword in ["自动续费", "自动扣款", "自动付款", "自动支付"]):
+        return True
+    return None
+
+
+def _clean_subscription_title(raw: str) -> str | None:
+    value = raw.strip()
+    value = re.sub(r"^(?:我|帮我|给我)?(?:已经)?(?:订阅了|订阅|开通了|开通|购买了|买了|续费了|续费)", "", value)
+    value = re.sub(r"(?:会员|订阅|服务|自动续费|续费)$", "", value)
+    value = value.strip(" 的")
+    return value or None

@@ -15,6 +15,7 @@ class McpServerTest(unittest.TestCase):
             expected_tools = {
                 "save_record",
                 "search_records",
+                "list_upcoming_subscriptions",
                 "get_record",
                 "find_duplicate",
                 "update_record_status",
@@ -25,6 +26,7 @@ class McpServerTest(unittest.TestCase):
             }
             self.assertTrue(result["ok"])
             self.assertTrue(expected_tools.issubset(set(result["tools"])))
+            self.assertGreaterEqual(result["upcoming_subscription_count"], 1)
             self.assertEqual(result["search_count"], 1)
             self.assertTrue(result["get_record_title"].startswith("MCP 测试耳机"))
             self.assertGreaterEqual(result["duplicate_count"], 1)

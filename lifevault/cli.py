@@ -46,6 +46,11 @@ def main() -> None:
     list_records = sub.add_parser("list", help="List records")
     list_records.add_argument("--query", default=None)
 
+    subscriptions = sub.add_parser("subscriptions", help="List upcoming subscription renewals")
+    subscriptions.add_argument("--days", type=int, default=30, help="Renewal window in days")
+    subscriptions.add_argument("--exclude-auto-renew", action="store_true", help="Hide auto-renewing subscriptions")
+    subscriptions.add_argument("--limit", type=int, default=20)
+
     reminders = sub.add_parser("reminders", help="List reminders")
     reminders.add_argument("--status", choices=[status.value for status in ReminderStatus], default=None)
 
@@ -130,6 +135,28 @@ def main() -> None:
             deadline = record.deadline.isoformat() if record.deadline else "-"
             amount = f"{record.amount:g}" if record.amount is not None else "-"
             print(f"{record.id} | v{record.version} | {record.record_type.value} | {record.title} | {amount} | {record.status.value} | {deadline}")
+        return
+
+    if args.command == "subscriptions":
+        result = graph_agent.mcp_client.list_upcoming_subscriptions(
+            days=args.days,
+            include_auto_renew=not args.exclude_auto_renew,
+            limit=args.limit,
+        )
+        if not result.get("ok"):
+            error = result.get("error", {})
+            print(f"Failed to list subscriptions: {error.get('code', 'unknown_error')}: {error.get('message', '')}")
+            raise SystemExit(2)
+        print(f"Upcoming subscriptions: {result['date_from']} -> {result['date_to']}")
+        for record in result["records"]:
+            deadline = record.get("deadline") or "-"
+            amount = record.get("amount")
+            amount_text = f"{amount:g} {record.get('currency', 'CNY')}" if amount is not None else "金额未知"
+            details = record.get("details") or {}
+            cycle = details.get("billing_cycle") or "-"
+            auto_renew = details.get("auto_renew")
+            auto_renew_text = "-" if auto_renew is None else ("auto" if auto_renew else "manual")
+            print(f"{record['id']} | {record['title']} | {amount_text} | {cycle} | {auto_renew_text} | {deadline}")
         return
 
     if args.command == "reminders":

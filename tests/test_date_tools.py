@@ -4,7 +4,13 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from lifevault.tools.date_tools import calculate_deadline, calculate_reminder_at, parse_date_text
+from lifevault.tools.date_tools import (
+    calculate_deadline,
+    calculate_next_renewal_date,
+    calculate_reminder_at,
+    parse_date_text,
+    parse_subscription_renewal_date,
+)
 
 
 class DateToolsTest(unittest.TestCase):
@@ -22,6 +28,25 @@ class DateToolsTest(unittest.TestCase):
             timezone_name="Asia/Shanghai",
         )
         self.assertEqual(reminder_at.isoformat(), "2026-07-30T09:00:00+08:00")
+
+    def test_subscription_renewal_date_expressions(self) -> None:
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.assertEqual(parse_date_text("下个月15号", "Asia/Shanghai", now).isoformat(), "2026-08-15")
+        self.assertEqual(parse_date_text("每月15号", "Asia/Shanghai", now).isoformat(), "2026-08-15")
+        self.assertEqual(parse_date_text("每年7月15日", "Asia/Shanghai", now).isoformat(), "2027-07-15")
+        self.assertEqual(parse_date_text("明年7月15日", "Asia/Shanghai", now).isoformat(), "2027-07-15")
+        self.assertEqual(parse_date_text("每周三", "Asia/Shanghai", now).isoformat(), "2026-07-29")
+
+    def test_subscription_day_only_uses_monthly_cycle(self) -> None:
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        renewal = parse_subscription_renewal_date("15号", "monthly", "Asia/Shanghai", now)
+        self.assertEqual(renewal.isoformat(), "2026-08-15")
+
+    def test_next_renewal_from_last_payment_date(self) -> None:
+        now = datetime(2026, 7, 27, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        last_payment = parse_date_text("2026-07-15", "Asia/Shanghai", now)
+        renewal = calculate_next_renewal_date(last_payment, "monthly", today=now.date())
+        self.assertEqual(renewal.isoformat(), "2026-08-15")
 
 
 if __name__ == "__main__":

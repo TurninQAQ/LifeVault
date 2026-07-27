@@ -135,6 +135,38 @@ class GraphAgentTest(unittest.TestCase):
             self.assertEqual(len(repo.search_records(settings.default_user_id, query="支架")), 0)
             agent.close()
 
+    def test_subscription_flow_creates_renewal_reminder_through_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(
+                database_path=Path(tmp) / "lifevault.db",
+                langgraph_checkpoint_path=Path(tmp) / "langgraph.sqlite",
+                use_qwen=False,
+            )
+            repo = VaultRepository(settings.database_path)
+            mcp_client = RecordingMcpClient(settings, repo)
+            agent = GraphAgent(settings, repo, mcp_client=mcp_client)
+
+            turn = agent.start_create_record(
+                "我订阅了腾讯视频会员，每月 30 元，2026-08-15 自动续费，续费前 3 天提醒我。"
+            )
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertEqual(turn.record["record_type"], "subscription")
+            self.assertEqual(turn.record["deadline"], "2026-08-15")
+
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(turn.interrupt_type, "reminder_confirmation")
+            self.assertEqual(turn.reminder["reminder_type"], "renewal")
+
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(turn.status, "completed")
+            self.assertEqual([call[0] for call in mcp_client.calls], ["find_duplicate", "save_record", "create_reminder"])
+
+            records = repo.search_records(settings.default_user_id, query="腾讯视频")
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].record_type.value, "subscription")
+            self.assertEqual(records[0].details["billing_cycle"], "monthly")
+            agent.close()
+
 
 class RecordingMcpClient:
     def __init__(self, settings: Settings, repository: VaultRepository):
