@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
 import streamlit as st
 
 from lifevault.agent.graph_agent import GraphAgent
@@ -34,7 +37,7 @@ def main() -> None:
         render_records(mcp_client)
 
     with tab_reminders:
-        render_reminders(mcp_client)
+        render_reminders(mcp_client, settings.default_timezone)
 
     with tab_settings:
         render_settings(repository, settings.default_user_id)
@@ -183,7 +186,7 @@ def render_records(mcp_client: PersonalVaultMcpClient) -> None:
                     st.rerun()
 
 
-def render_reminders(mcp_client: PersonalVaultMcpClient) -> None:
+def render_reminders(mcp_client: PersonalVaultMcpClient, timezone_name: str) -> None:
     status_value = st.selectbox("提醒状态", options=["all"] + [status.value for status in ReminderStatus])
     status = None if status_value == "all" else status_value
     result = mcp_client.list_reminders(status=status)
@@ -200,10 +203,16 @@ def render_reminders(mcp_client: PersonalVaultMcpClient) -> None:
             st.write(reminder["message"])
             st.caption(f"{reminder['id']} / record {reminder['record_id']}")
             if reminder["status"] == ReminderStatus.PENDING.value:
-                if st.button("取消提醒", key=f"cancel_{reminder['id']}"):
+                cols = st.columns(4)
+                if cols[0].button("取消提醒", key=f"cancel_{reminder['id']}"):
                     cancel_result = mcp_client.cancel_reminder(reminder["id"], user_confirmed=True)
                     if render_mcp_error("cancel_reminder", cancel_result):
                         st.rerun()
+                for index, (label, scheduled_at) in enumerate(fixed_snooze_options(timezone_name), start=1):
+                    if cols[index].button(label, key=f"snooze_{label}_{reminder['id']}"):
+                        snooze_result = mcp_client.snooze_reminder(reminder["id"], scheduled_at.isoformat())
+                        if render_mcp_error("snooze_reminder", snooze_result):
+                            st.rerun()
 
 
 def render_settings(repository: VaultRepository, user_id: str) -> None:
@@ -234,6 +243,18 @@ def render_mcp_error(tool_name: str, result: dict) -> bool:
     else:
         st.error(f"MCP {tool_name} failed.")
     return False
+
+
+def fixed_snooze_options(timezone_name: str) -> list[tuple[str, datetime]]:
+    now = datetime.now(ZoneInfo(timezone_name))
+    tomorrow = now.date() + timedelta(days=1)
+    days_until_next_monday = (7 - now.weekday()) % 7 or 7
+    next_monday = now.date() + timedelta(days=days_until_next_monday)
+    return [
+        ("1 小时后", now + timedelta(hours=1)),
+        ("明天 09:00", datetime.combine(tomorrow, time(hour=9), tzinfo=now.tzinfo)),
+        ("下周一 09:00", datetime.combine(next_monday, time(hour=9), tzinfo=now.tzinfo)),
+    ]
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ class McpBoundaryTest(unittest.TestCase):
         for required in [
             "mcp_client.search_records",
             "mcp_client.list_reminders",
+            "mcp_client.snooze_reminder",
             "mcp_client.update_record_status",
             "mcp_client.list_upcoming_subscriptions",
         ]:
@@ -42,6 +43,7 @@ class McpBoundaryTest(unittest.TestCase):
         for required in [
             "mcp_client.search_records",
             "mcp_client.list_reminders",
+            "mcp_client.snooze_reminder",
             "mcp_client.update_record_status",
             "mcp_client.cancel_reminder",
         ]:

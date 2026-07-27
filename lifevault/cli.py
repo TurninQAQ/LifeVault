@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.agent.service import LifeVaultAgent
@@ -54,6 +55,12 @@ def main() -> None:
 
     reminders = sub.add_parser("reminders", help="List reminders")
     reminders.add_argument("--status", choices=[status.value for status in ReminderStatus], default=None)
+
+    snooze = sub.add_parser("snooze-reminder", help="Snooze a reminder")
+    snooze.add_argument("reminder_id")
+    snooze_group = snooze.add_mutually_exclusive_group()
+    snooze_group.add_argument("--minutes", type=int, default=None, help="Minutes from now. Defaults to 60.")
+    snooze_group.add_argument("--at", default=None, help="New scheduled datetime in ISO format")
 
     update = sub.add_parser("status", help="Update a record status")
     update.add_argument("record_id")
@@ -173,6 +180,13 @@ def main() -> None:
             )
         return
 
+    if args.command == "snooze-reminder":
+        scheduled_at = parse_snooze_scheduled_at(args.at, args.minutes, settings.default_timezone)
+        result = mcp_client.snooze_reminder(args.reminder_id, scheduled_at.isoformat())
+        reminder = require_mcp_ok("snooze_reminder", result)["reminder"]
+        print(f"Snoozed {args.reminder_id} to {reminder['scheduled_at']} as {reminder['id']}")
+        return
+
     if args.command == "status":
         result = mcp_client.update_record_status(
             args.record_id,
@@ -259,6 +273,22 @@ def require_mcp_ok(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
     else:
         print(f"MCP {tool_name} failed.")
     raise SystemExit(2)
+
+
+def parse_snooze_scheduled_at(at: str | None, minutes: int | None, timezone_name: str) -> datetime:
+    if at:
+        try:
+            parsed = datetime.fromisoformat(at)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --at datetime: {at}") from exc
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=ZoneInfo(timezone_name))
+        return parsed
+
+    delay_minutes = 60 if minutes is None else minutes
+    if delay_minutes <= 0:
+        raise SystemExit("--minutes must be positive")
+    return datetime.now(ZoneInfo(timezone_name)) + timedelta(minutes=delay_minutes)
 
 
 def auto_payload(turn: GraphTurn, no_reminder: bool) -> dict[str, str] | None:

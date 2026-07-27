@@ -70,7 +70,15 @@ class McpClientTest(unittest.TestCase):
             self.assertTrue(listed["ok"])
             self.assertEqual(len(listed["reminders"]), 1)
 
-            cancelled = client.cancel_reminder(reminder["reminder"]["id"], user_confirmed=True)
+            snoozed = client.snooze_reminder(
+                reminder["reminder"]["id"],
+                "2026-07-30T10:00:00+08:00",
+            )
+            self.assertTrue(snoozed["ok"])
+            self.assertEqual(snoozed["parent_reminder"]["status"], "snoozed")
+            self.assertEqual(snoozed["reminder"]["status"], "pending")
+
+            cancelled = client.cancel_reminder(snoozed["reminder"]["id"], user_confirmed=True)
             self.assertTrue(cancelled["ok"])
             self.assertEqual(cancelled["reminder"]["status"], "cancelled")
 

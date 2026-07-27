@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.6 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.7 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -29,6 +29,13 @@ v0.6 tightens the MCP data boundary:
 - Streamlit record and reminder pages use MCP for searches, status updates, reminder lists, and reminder cancellation.
 - MCP failures are shown explicitly; UI and CLI do not silently fall back to repository access.
 - Settings still use the local repository directly for user preferences.
+
+v0.7 hardens reminder delivery:
+
+- ReminderWorker accepts injectable notification providers and has tests for success, failure, inactive records, repeated runs, and quiet hours.
+- Quiet hours automatically snooze due reminders to the quiet-hours end time, preserving parent/child reminder history.
+- Desktop notification failure still falls back to console output, but the reminder is marked `failed` because the target channel did not deliver.
+- CLI and Streamlit reminder center can snooze pending reminders through MCP.
 
 Create-record interrupts:
 
@@ -72,6 +79,8 @@ python -m lifevault.cli add "我订阅了腾讯视频会员，每月 30 元，�
 python -m lifevault.cli list
 python -m lifevault.cli subscriptions --days 30
 python -m lifevault.cli reminders
+python -m lifevault.cli snooze-reminder REMINDER_ID --minutes 60
+python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:00
 python -m lifevault.cli worker --once
 ```
 

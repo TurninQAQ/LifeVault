@@ -449,6 +449,8 @@ class VaultRepository:
                 raise ValueError("Reminder not found.")
             if original["status"] == ReminderStatus.CANCELLED.value:
                 raise ValueError("Cancelled reminders cannot be snoozed.")
+            if original["status"] in {ReminderStatus.SENT.value, ReminderStatus.FAILED.value}:
+                raise ValueError("Sent or failed reminders cannot be snoozed.")
 
             duplicate = conn.execute(
                 """
