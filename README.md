@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.5 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.6 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -21,6 +21,14 @@ v0.5 adds a focused subscription renewal loop:
 - Subscription records store the next renewal date in `deadline` and subscription metadata in `details`.
 - Renewal reminders use `reminder_type=renewal`.
 - MCP and CLI can list upcoming subscription renewals.
+
+v0.6 tightens the MCP data boundary:
+
+- Agent natural-language search calls MCP `search_records` instead of reading SQLite directly.
+- CLI record search/list, reminder list, status updates, and subscription renewal queries use the in-process MCP client.
+- Streamlit record and reminder pages use MCP for searches, status updates, reminder lists, and reminder cancellation.
+- MCP failures are shown explicitly; UI and CLI do not silently fall back to repository access.
+- Settings still use the local repository directly for user preferences.
 
 Create-record interrupts:
 
@@ -111,7 +119,7 @@ snooze_reminder
 cancel_reminder
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, reminder creation, and upcoming subscription queries; the stdio MCP server remains available for external clients and integration smoke tests.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation. The CLI, Streamlit record/reminder views, and Agent search use the same MCP client for record and reminder data access; the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 

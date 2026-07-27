@@ -4,6 +4,7 @@ import streamlit as st
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.config import get_settings
+from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus, UserPreference
 from lifevault.storage.repository import VaultRepository
 
@@ -12,14 +13,15 @@ st.set_page_config(page_title="LifeVault", page_icon="LV", layout="wide")
 
 
 @st.cache_resource
-def get_services() -> tuple[GraphAgent, VaultRepository]:
+def get_services() -> tuple[GraphAgent, VaultRepository, PersonalVaultMcpClient]:
     settings = get_settings()
     repository = VaultRepository(settings.database_path)
-    return GraphAgent(settings, repository), repository
+    mcp_client = InProcessPersonalVaultMcpClient(settings, repository)
+    return GraphAgent(settings, repository, mcp_client=mcp_client), repository, mcp_client
 
 
 def main() -> None:
-    agent, repository = get_services()
+    agent, repository, mcp_client = get_services()
     settings = get_settings()
 
     st.title("LifeVault")
@@ -29,10 +31,10 @@ def main() -> None:
         render_add_record(agent)
 
     with tab_records:
-        render_records(repository, settings.default_user_id)
+        render_records(mcp_client)
 
     with tab_reminders:
-        render_reminders(repository, settings.default_user_id)
+        render_reminders(mcp_client)
 
     with tab_settings:
         render_settings(repository, settings.default_user_id)
@@ -150,9 +152,12 @@ def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
         st.json(turn.reminder or {})
 
 
-def render_records(repository: VaultRepository, user_id: str) -> None:
+def render_records(mcp_client: PersonalVaultMcpClient) -> None:
     query = st.text_input("关键词", key="record_query")
-    records = repository.search_records(user_id, query=query or None)
+    result = mcp_client.search_records(query=query or None)
+    if not render_mcp_error("search_records", result):
+        return
+    records = result.get("records", [])
     if not records:
         st.info("暂无记录")
         return
@@ -160,40 +165,45 @@ def render_records(repository: VaultRepository, user_id: str) -> None:
     for record in records:
         with st.container(border=True):
             cols = st.columns([3, 1.2, 1.2, 1.4, 1.4])
-            cols[0].markdown(f"**{record.title}**")
-            cols[1].write(record.record_type.value)
-            cols[2].write(record.status.value)
-            cols[3].write(record.deadline.isoformat() if record.deadline else "无截止日")
-            cols[4].write(f"v{record.version}")
-            st.caption(record.id)
+            cols[0].markdown(f"**{record['title']}**")
+            cols[1].write(record["record_type"])
+            cols[2].write(record["status"])
+            cols[3].write(record.get("deadline") or "无截止日")
+            cols[4].write(f"v{record['version']}")
+            st.caption(record["id"])
             status = st.selectbox(
                 "状态",
                 options=[item.value for item in RecordStatus],
-                index=[item.value for item in RecordStatus].index(record.status.value),
-                key=f"status_{record.id}",
+                index=[item.value for item in RecordStatus].index(record["status"]),
+                key=f"status_{record['id']}",
             )
-            if st.button("更新状态", key=f"update_{record.id}"):
-                repository.update_record_status(user_id, record.id, RecordStatus(status), record.version)
-                st.rerun()
+            if st.button("更新状态", key=f"update_{record['id']}"):
+                update_result = mcp_client.update_record_status(record["id"], status, record["version"])
+                if render_mcp_error("update_record_status", update_result):
+                    st.rerun()
 
 
-def render_reminders(repository: VaultRepository, user_id: str) -> None:
+def render_reminders(mcp_client: PersonalVaultMcpClient) -> None:
     status_value = st.selectbox("提醒状态", options=["all"] + [status.value for status in ReminderStatus])
-    status = None if status_value == "all" else ReminderStatus(status_value)
-    reminders = repository.list_reminders(user_id, status=status)
+    status = None if status_value == "all" else status_value
+    result = mcp_client.list_reminders(status=status)
+    if not render_mcp_error("list_reminders", result):
+        return
+    reminders = result.get("reminders", [])
     if not reminders:
         st.info("暂无提醒")
         return
 
     for reminder in reminders:
         with st.container(border=True):
-            st.write(f"**{reminder.scheduled_at.isoformat()}** | {reminder.status.value}")
-            st.write(reminder.message)
-            st.caption(f"{reminder.id} / record {reminder.record_id}")
-            if reminder.status == ReminderStatus.PENDING:
-                if st.button("取消提醒", key=f"cancel_{reminder.id}"):
-                    repository.cancel_reminder(user_id, reminder.id, user_confirmed=True)
-                    st.rerun()
+            st.write(f"**{reminder['scheduled_at']}** | {reminder['status']}")
+            st.write(reminder["message"])
+            st.caption(f"{reminder['id']} / record {reminder['record_id']}")
+            if reminder["status"] == ReminderStatus.PENDING.value:
+                if st.button("取消提醒", key=f"cancel_{reminder['id']}"):
+                    cancel_result = mcp_client.cancel_reminder(reminder["id"], user_confirmed=True)
+                    if render_mcp_error("cancel_reminder", cancel_result):
+                        st.rerun()
 
 
 def render_settings(repository: VaultRepository, user_id: str) -> None:
@@ -213,6 +223,17 @@ def render_settings(repository: VaultRepository, user_id: str) -> None:
             )
         )
         st.success("设置已保存")
+
+
+def render_mcp_error(tool_name: str, result: dict) -> bool:
+    if result.get("ok"):
+        return True
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict):
+        st.error(f"MCP {tool_name} failed: {error.get('code', 'unknown_error')}: {error.get('message', '')}")
+    else:
+        st.error(f"MCP {tool_name} failed.")
+    return False
 
 
 if __name__ == "__main__":

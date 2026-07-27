@@ -20,6 +20,7 @@ from lifevault.models.schemas import (
     ReminderType,
     SaveResult,
 )
+from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import (
     calculate_deadline,
@@ -38,9 +39,15 @@ class ConfirmationRequired(PermissionError):
 
 
 class LifeVaultAgent:
-    def __init__(self, settings: Settings, repository: VaultRepository | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        repository: VaultRepository | None = None,
+        mcp_client: PersonalVaultMcpClient | None = None,
+    ):
         self.settings = settings
         self.repository = repository or VaultRepository(settings.database_path)
+        self.mcp_client = mcp_client or InProcessPersonalVaultMcpClient(settings, self.repository)
         self.extractor = Extractor(settings)
 
     def create_draft(self, raw_input: str, thread_id: str | None = None) -> DraftResult:
@@ -130,12 +137,17 @@ class LifeVaultAgent:
         sanitized = sanitize_input(text, self.settings.input_max_chars)
         candidate, _warnings = self.extractor.extract_record(sanitized, now)
         query = candidate.search_query or candidate.title or sanitized
-        records = self.repository.search_records(
-            self.settings.default_user_id,
-            query=query if query != sanitized else None,
-            record_types=[candidate.record_type] if candidate.record_type else None,
+        record_types = None
+        if candidate.intent == "search_records" and candidate.record_type:
+            record_types = [candidate.record_type.value]
+        result = self.mcp_client.search_records(
+            query=query,
+            record_types=record_types,
             limit=20,
         )
+        if not result.get("ok"):
+            raise RuntimeError(_mcp_error_message("search_records", result))
+        records = [LifeRecord.model_validate(record) for record in result.get("records", [])]
         answer = self._format_search_answer(records)
         return records, answer
 
@@ -344,3 +356,12 @@ class LifeVaultAgent:
         if billing_cycle == "yearly":
             return f"{renewal.month:02d}-{renewal.day:02d}"
         return renewal.day
+
+
+def _mcp_error_message(tool_name: str, result: dict[str, Any]) -> str:
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict):
+        code = error.get("code", "unknown_error")
+        message = error.get("message", "")
+        return f"MCP {tool_name} failed: {code}: {message}"
+    return f"MCP {tool_name} failed."

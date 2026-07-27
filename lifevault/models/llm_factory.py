@@ -56,6 +56,18 @@ class QwenClient:
 
 class FallbackExtractor:
     def extract_record(self, text: str, now: datetime) -> ExtractedRecordCandidate:
+        if _guess_intent(text) == "search_records":
+            record_type = _guess_record_type_for_search(text)
+            query = _extract_search_query(text)
+            return ExtractedRecordCandidate.model_validate(
+                {
+                    "intent": "search_records",
+                    "record_type": record_type,
+                    "title": query,
+                    "search_query": query,
+                }
+            )
+
         record_type = _guess_record_type(text)
         amount = _extract_amount(text)
         reminder_requested = any(keyword in text for keyword in ["提醒", "到期", "续费前", "截止前"])
@@ -198,6 +210,31 @@ def _guess_record_type(text: str) -> RecordType:
     if any(keyword in text for keyword in ["账单", "水电", "房租", "信用卡", "缴费", "宽带"]):
         return RecordType.BILL
     return RecordType.PURCHASE
+
+
+def _guess_intent(text: str) -> str:
+    if any(keyword in text for keyword in ["查询", "查一下", "查找", "搜索", "找一下", "有没有", "哪些", "列出", "显示一下", "显示所有"]):
+        return "search_records"
+    return "create_record"
+
+
+def _guess_record_type_for_search(text: str) -> RecordType | None:
+    if any(keyword in text for keyword in ["订阅", "会员", "续费", "自动扣款", "自动续费"]):
+        return RecordType.SUBSCRIPTION
+    if any(keyword in text for keyword in ["账单", "水电", "房租", "信用卡", "缴费", "宽带"]):
+        return RecordType.BILL
+    if any(keyword in text for keyword in ["订单", "购买", "买了", "退货", "保修"]):
+        return RecordType.PURCHASE
+    return None
+
+
+def _extract_search_query(text: str) -> str | None:
+    query = text.strip()
+    query = re.sub(r"^(?:帮我|给我|我想|请)?(?:查询|查一下|查找|搜索|找一下|找|列出|显示|看看)", "", query)
+    query = re.sub(r"(?:有没有|哪些)", "", query)
+    query = re.sub(r"(?:记录|订单|账单|订阅|会员|服务|快到期|快续费|到期|续费|一下|的|吗|呢|[？?。])", "", query)
+    query = query.strip(" ，,。；;")
+    return query or None
 
 
 def _extract_amount(text: str) -> float | None:

@@ -10,6 +10,7 @@ from typing import Any
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.agent.service import LifeVaultAgent
 from lifevault.config import get_settings
+from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient
 from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
 from lifevault.storage.repository import VaultRepository
 from lifevault.worker.reminder_worker import ReminderWorker
@@ -85,8 +86,9 @@ def main() -> None:
         return
 
     repository = VaultRepository(settings.database_path)
-    agent = LifeVaultAgent(settings, repository)
-    graph_agent = GraphAgent(settings, repository)
+    mcp_client = InProcessPersonalVaultMcpClient(settings, repository)
+    agent = LifeVaultAgent(settings, repository, mcp_client=mcp_client)
+    graph_agent = GraphAgent(settings, repository, mcp_client=mcp_client)
 
     if args.command == "init-db":
         print(f"Initialized database: {settings.database_path}")
@@ -130,23 +132,25 @@ def main() -> None:
         return
 
     if args.command == "list":
-        records = repository.search_records(settings.default_user_id, query=args.query)
+        result = mcp_client.search_records(query=args.query)
+        records = require_mcp_ok("search_records", result).get("records", [])
         for record in records:
-            deadline = record.deadline.isoformat() if record.deadline else "-"
-            amount = f"{record.amount:g}" if record.amount is not None else "-"
-            print(f"{record.id} | v{record.version} | {record.record_type.value} | {record.title} | {amount} | {record.status.value} | {deadline}")
+            deadline = record.get("deadline") or "-"
+            amount = record.get("amount")
+            amount_text = f"{amount:g}" if amount is not None else "-"
+            print(
+                f"{record['id']} | v{record['version']} | {record['record_type']} | "
+                f"{record['title']} | {amount_text} | {record['status']} | {deadline}"
+            )
         return
 
     if args.command == "subscriptions":
-        result = graph_agent.mcp_client.list_upcoming_subscriptions(
+        result = mcp_client.list_upcoming_subscriptions(
             days=args.days,
             include_auto_renew=not args.exclude_auto_renew,
             limit=args.limit,
         )
-        if not result.get("ok"):
-            error = result.get("error", {})
-            print(f"Failed to list subscriptions: {error.get('code', 'unknown_error')}: {error.get('message', '')}")
-            raise SystemExit(2)
+        require_mcp_ok("list_upcoming_subscriptions", result)
         print(f"Upcoming subscriptions: {result['date_from']} -> {result['date_to']}")
         for record in result["records"]:
             deadline = record.get("deadline") or "-"
@@ -160,23 +164,23 @@ def main() -> None:
         return
 
     if args.command == "reminders":
-        status = ReminderStatus(args.status) if args.status else None
-        reminders_list = repository.list_reminders(settings.default_user_id, status=status)
+        result = mcp_client.list_reminders(status=args.status)
+        reminders_list = require_mcp_ok("list_reminders", result).get("reminders", [])
         for reminder in reminders_list:
             print(
-                f"{reminder.id} | {reminder.record_id} | {reminder.status.value} | "
-                f"{reminder.scheduled_at.isoformat()} | {reminder.message}"
+                f"{reminder['id']} | {reminder['record_id']} | {reminder['status']} | "
+                f"{reminder['scheduled_at']} | {reminder['message']}"
             )
         return
 
     if args.command == "status":
-        record = repository.update_record_status(
-            settings.default_user_id,
+        result = mcp_client.update_record_status(
             args.record_id,
-            RecordStatus(args.new_status),
+            args.new_status,
             args.expected_version,
         )
-        print(f"Updated {record.id} to {record.status.value}, version={record.version}")
+        record = require_mcp_ok("update_record_status", result)["record"]
+        print(f"Updated {record['id']} to {record['status']}, version={record['version']}")
         return
 
     if args.command == "worker":
@@ -244,6 +248,17 @@ def print_json(data: dict[str, Any]) -> None:
     import json
 
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def require_mcp_ok(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("ok"):
+        return result
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict):
+        print(f"MCP {tool_name} failed: {error.get('code', 'unknown_error')}: {error.get('message', '')}")
+    else:
+        print(f"MCP {tool_name} failed.")
+    raise SystemExit(2)
 
 
 def auto_payload(turn: GraphTurn, no_reminder: bool) -> dict[str, str] | None:

@@ -48,6 +48,70 @@ class AgentTest(unittest.TestCase):
             self.assertEqual(draft.reminder.reminder_type.value, "renewal")
             self.assertEqual(draft.reminder.scheduled_at.isoformat(), "2026-08-12T09:00:00+08:00")
 
+    def test_search_uses_mcp_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(
+                database_path=Path(tmp) / "test.db",
+                use_qwen=False,
+            )
+            repo = VaultRepository(settings.database_path)
+            mcp_client = SearchRecordingMcpClient()
+            agent = LifeVaultAgent(settings, repo, mcp_client=mcp_client)
+
+            records, answer = agent.search("查一下耳机订单")
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].title, "耳机")
+            self.assertIn("耳机", answer)
+            self.assertEqual(mcp_client.calls, [("search_records", {"query": "耳机", "record_types": ["purchase"], "limit": 20})])
+
+
+class SearchRecordingMcpClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def search_records(
+        self,
+        query: str | None = None,
+        record_types: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        self.calls.append(
+            (
+                "search_records",
+                {
+                    "query": query,
+                    "record_types": record_types,
+                    "limit": limit,
+                },
+            )
+        )
+        return {
+            "ok": True,
+            "records": [
+                {
+                    "id": "record-1",
+                    "user_id": "local",
+                    "record_type": "purchase",
+                    "title": "耳机",
+                    "amount": 299.0,
+                    "currency": "CNY",
+                    "event_date": "2026-07-25",
+                    "deadline": "2026-08-01",
+                    "status": "active",
+                    "version": 1,
+                    "details": {"merchant": "京东"},
+                    "notes": None,
+                    "source_text_hash": None,
+                    "source_text_preview": None,
+                    "created_at": "2026-07-27T00:00:00+00:00",
+                    "updated_at": "2026-07-27T00:00:00+00:00",
+                }
+            ],
+        }
+
 
 if __name__ == "__main__":
     unittest.main()

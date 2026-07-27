@@ -17,6 +17,19 @@ class PersonalVaultMcpClient(Protocol):
     def find_duplicate(self, record: dict[str, Any], limit: int = 5) -> dict[str, Any]:
         ...
 
+    def search_records(
+        self,
+        query: str | None = None,
+        record_types: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        ...
+
+    def get_record(self, record_id: str) -> dict[str, Any]:
+        ...
+
     def save_record(
         self,
         record: dict[str, Any],
@@ -46,6 +59,15 @@ class PersonalVaultMcpClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def list_reminders(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+        ...
+
+    def update_record_status(self, record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
+        ...
+
+    def cancel_reminder(self, reminder_id: str, user_confirmed: bool) -> dict[str, Any]:
+        ...
+
 
 class InProcessPersonalVaultMcpClient:
     """Synchronous client facade over the in-process FastMCP server."""
@@ -59,6 +81,28 @@ class InProcessPersonalVaultMcpClient:
 
     def find_duplicate(self, record: dict[str, Any], limit: int = 5) -> dict[str, Any]:
         return self.call_tool("find_duplicate", {"record": record, "limit": limit})
+
+    def search_records(
+        self,
+        query: str | None = None,
+        record_types: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "search_records",
+            {
+                "query": query,
+                "record_types": record_types,
+                "date_from": date_from,
+                "date_to": date_to,
+                "limit": limit,
+            },
+        )
+
+    def get_record(self, record_id: str) -> dict[str, Any]:
+        return self.call_tool("get_record", {"record_id": record_id})
 
     def save_record(
         self,
@@ -112,6 +156,28 @@ class InProcessPersonalVaultMcpClient:
                 "days": days,
                 "include_auto_renew": include_auto_renew,
                 "limit": limit,
+            },
+        )
+
+    def list_reminders(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return self.call_tool("list_reminders", {"status": status, "limit": limit})
+
+    def update_record_status(self, record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
+        return self.call_tool(
+            "update_record_status",
+            {
+                "record_id": record_id,
+                "new_status": new_status,
+                "expected_version": expected_version,
+            },
+        )
+
+    def cancel_reminder(self, reminder_id: str, user_confirmed: bool) -> dict[str, Any]:
+        return self.call_tool(
+            "cancel_reminder",
+            {
+                "reminder_id": reminder_id,
+                "user_confirmed": user_confirmed,
             },
         )
 

@@ -32,6 +32,14 @@ class McpClientTest(unittest.TestCase):
             self.assertTrue(saved["ok"])
             record_id = saved["record"]["id"]
 
+            searched = client.search_records(query="MCP Client 耳机", record_types=["purchase"])
+            self.assertTrue(searched["ok"])
+            self.assertEqual(len(searched["records"]), 1)
+
+            fetched = client.get_record(record_id)
+            self.assertTrue(fetched["ok"])
+            self.assertEqual(fetched["record"]["title"], "MCP Client 耳机")
+
             duplicate = client.find_duplicate(record)
             self.assertTrue(duplicate["ok"])
             self.assertTrue(duplicate["duplicate_candidates"])
@@ -57,6 +65,18 @@ class McpClientTest(unittest.TestCase):
             )
             self.assertTrue(reminder["ok"])
             self.assertEqual(reminder["reminder"]["record_id"], record_id)
+
+            listed = client.list_reminders(status="pending")
+            self.assertTrue(listed["ok"])
+            self.assertEqual(len(listed["reminders"]), 1)
+
+            cancelled = client.cancel_reminder(reminder["reminder"]["id"], user_confirmed=True)
+            self.assertTrue(cancelled["ok"])
+            self.assertEqual(cancelled["reminder"]["status"], "cancelled")
+
+            updated = client.update_record_status(record_id, "completed", expected_version=1)
+            self.assertTrue(updated["ok"])
+            self.assertEqual(updated["record"]["status"], "completed")
 
     def test_in_process_client_lists_upcoming_subscriptions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
