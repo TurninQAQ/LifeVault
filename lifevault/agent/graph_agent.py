@@ -15,9 +15,9 @@ from lifevault.models.schemas import (
     ExtractedRecordCandidate,
     GraphTurn,
     LifeRecordCreate,
-    Reminder,
     ReminderCreate,
 )
+from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import now_in_timezone
 from lifevault.tools.idempotency import stable_key
@@ -48,10 +48,16 @@ class LifeVaultGraphState(TypedDict, total=False):
 class GraphAgent:
     """LangGraph wrapper for the create-record workflow."""
 
-    def __init__(self, settings: Settings, repository: VaultRepository | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        repository: VaultRepository | None = None,
+        mcp_client: PersonalVaultMcpClient | None = None,
+    ):
         self.settings = settings
         self.repository = repository or VaultRepository(settings.database_path)
         self.service = LifeVaultAgent(settings, self.repository)
+        self.mcp_client = mcp_client or InProcessPersonalVaultMcpClient(settings, self.repository)
         settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self._checkpoint_conn = sqlite3.connect(
             settings.langgraph_checkpoint_path,
@@ -129,7 +135,14 @@ class GraphAgent:
                 "end": END,
             },
         )
-        builder.add_edge("save_record", "confirm_reminder")
+        builder.add_conditional_edges(
+            "save_record",
+            self._route_after_save_record,
+            {
+                "confirm_reminder": "confirm_reminder",
+                "end": END,
+            },
+        )
         builder.add_conditional_edges(
             "confirm_reminder",
             self._route_after_reminder_confirmation,
@@ -204,15 +217,24 @@ class GraphAgent:
         now = now_in_timezone(self.settings.default_timezone)
         candidate = ExtractedRecordCandidate.model_validate(state["candidate"])
         record = self.service._build_record(candidate, state["sanitized_input"], now)
-        duplicates = self.repository.find_duplicate(self.settings.default_user_id, record)
+        duplicate_result = self.mcp_client.find_duplicate(record.model_dump(mode="json"))
+        if not duplicate_result.get("ok"):
+            return {
+                "record": record.model_dump(mode="json"),
+                "cancelled": True,
+                "errors": [*state.get("errors", []), _mcp_error_message("find_duplicate", duplicate_result)],
+            }
+        duplicates = duplicate_result.get("duplicate_candidates", [])
         reminder = self.service._build_reminder(candidate, record)
         return {
             "record": record.model_dump(mode="json"),
-            "duplicate_candidates": [item.model_dump(mode="json") for item in duplicates],
+            "duplicate_candidates": duplicates,
             "reminder": reminder.model_dump(mode="json") if reminder else {},
         }
 
     def _review_duplicate_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
+        if state.get("cancelled"):
+            return {}
         duplicates = state.get("duplicate_candidates", [])
         if not duplicates:
             return {"duplicate_decision": "continue"}
@@ -265,15 +287,20 @@ class GraphAgent:
             record.event_date,
             record.deadline,
         )
-        saved_record = self.repository.save_record(
-            self.settings.default_user_id,
-            record,
+        save_result = self.mcp_client.save_record(
+            record.model_dump(mode="json"),
             idempotency_key=record_key,
-            actor="graph",
+            user_confirmed=bool(state.get("record_confirmed")),
         )
+        if not save_result.get("ok"):
+            return {
+                "cancelled": True,
+                "errors": [*state.get("errors", []), _mcp_error_message("save_record", save_result)],
+            }
+        saved_record = save_result["record"]
         return {
-            "saved_record_id": saved_record.id,
-            "saved_record": saved_record.model_dump(mode="json"),
+            "saved_record_id": saved_record["id"],
+            "saved_record": saved_record,
         }
 
     def _confirm_reminder_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
@@ -314,15 +341,23 @@ class GraphAgent:
             reminder.reminder_type.value,
             reminder.scheduled_at.isoformat(),
         )
-        saved_reminder: Reminder = self.repository.create_reminder(
-            self.settings.default_user_id,
-            reminder,
+        create_result = self.mcp_client.create_reminder(
+            record_id=reminder.record_id,
+            scheduled_at=reminder.scheduled_at.isoformat(),
+            reminder_type=reminder.reminder_type.value,
             idempotency_key=reminder_key,
-            actor="graph",
+            user_confirmed=bool(state.get("reminder_confirmed")),
+            message=reminder.message,
+            parent_id=reminder.parent_id,
         )
+        if not create_result.get("ok"):
+            return {
+                "errors": [*state.get("errors", []), _mcp_error_message("create_reminder", create_result)],
+            }
+        saved_reminder = create_result["reminder"]
         return {
-            "reminder_id": saved_reminder.id,
-            "saved_reminder": saved_reminder.model_dump(mode="json"),
+            "reminder_id": saved_reminder["id"],
+            "saved_reminder": saved_reminder,
         }
 
     def _route_after_validate(self, state: LifeVaultGraphState) -> str:
@@ -341,6 +376,11 @@ class GraphAgent:
         if state.get("cancelled") or not state.get("record_confirmed"):
             return "end"
         return "save"
+
+    def _route_after_save_record(self, state: LifeVaultGraphState) -> str:
+        if state.get("cancelled") or not state.get("saved_record_id"):
+            return "end"
+        return "confirm_reminder"
 
     def _route_after_reminder_confirmation(self, state: LifeVaultGraphState) -> str:
         if state.get("reminder_confirmed"):
@@ -441,3 +481,12 @@ def _meaningful_candidate_value(field: str, value: Any, text: str) -> bool:
 
 def _is_emptyish(value: Any) -> bool:
     return value is None or value == "" or value == []
+
+
+def _mcp_error_message(tool_name: str, result: dict[str, Any]) -> str:
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict):
+        code = error.get("code", "unknown_error")
+        message = error.get("message", "")
+        return f"MCP {tool_name} failed: {code}: {message}"
+    return f"MCP {tool_name} failed."

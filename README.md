@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.3 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.4 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -8,11 +8,11 @@ Implemented chain:
 
 ```text
 natural language -> Qwen/fallback extraction -> LangGraph interrupts
--> deterministic tools -> user confirmation -> SQLite record
--> reminder confirmation -> SQLite reminder -> worker notification
+-> deterministic tools -> user confirmation -> MCP Client -> MCP Server
+-> SQLite record -> reminder confirmation -> SQLite reminder -> worker notification
 ```
 
-The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
+The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
 
 Create-record interrupts:
 
@@ -100,7 +100,7 @@ snooze_reminder
 cancel_reminder
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation; the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 
@@ -122,7 +122,7 @@ python -m unittest discover -s tests -v
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
 - `lifevault/agent`: LangGraph create-record workflow plus the v0.1 service fallback.
-- `lifevault/mcp_server`: FastMCP stdio server and smoke client.
+- `lifevault/mcp_server`: FastMCP stdio server, in-process MCP client, and smoke client.
 - `lifevault/app`: Streamlit UI.
 - `lifevault/worker`: reminder scanner and notification sender.
 - `skills`: task-specific extraction instructions for purchase, subscription, and bill records.
