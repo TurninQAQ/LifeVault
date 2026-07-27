@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.8 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.9 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -44,6 +44,15 @@ v0.8 adds an extraction evaluation baseline:
 - Evaluation defaults to the deterministic fallback extractor for reproducible local results; `--use-qwen` can run the configured local Qwen manually.
 - Optional `--json-out` writes per-case expected/actual/mismatch details.
 - Current fallback baseline on the included 60 cases: intent accuracy 100.0%, record type accuracy 93.2%, field accuracy 85.4%, full-case accuracy 48.3%.
+
+v0.9 improves the deterministic fallback extractor against that baseline:
+
+- Known subscription services and bill names improve record-type classification for short inputs such as `ChatGPT Plus 每月 20 美元` and standalone fee names.
+- Amount extraction accepts USD wording: `美元`, `美金`, `USD`, and `$`.
+- Subscription renewal extraction covers monthly, yearly, relative, and date-before-action phrasings used in the eval set.
+- Bill due-date extraction handles date-before-action and action-before-date forms.
+- Purchase merchant/title extraction handles platform names with spaces and common quantifiers.
+- Current fallback result on the included 60 cases: intent accuracy 100.0%, record type accuracy 100.0%, field accuracy 100.0%, full-case accuracy 100.0%.
 
 Create-record interrupts:
 

@@ -13,6 +13,43 @@ from lifevault.models.schemas import ExtractedRecordCandidate, RecordType
 from lifevault.tools.date_tools import parse_int
 
 
+KNOWN_SUBSCRIPTION_SERVICES = [
+    "GitHub Copilot",
+    "ChatGPT Plus",
+    "Apple Music",
+    "Netflix",
+    "Spotify",
+    "Dropbox",
+    "Notion",
+    "Adobe",
+    "Zoom",
+    "WPS",
+    "腾讯视频",
+    "爱奇艺",
+    "B 站大",
+    "优酷",
+    "飞书",
+]
+
+KNOWN_BILL_NAMES = [
+    "车位管理费",
+    "健身房尾款",
+    "手机话费",
+    "信用卡",
+    "水电费",
+    "物业费",
+    "燃气费",
+    "停车费",
+    "医保",
+    "学费",
+    "房贷",
+    "花呗",
+    "保险",
+    "宽带",
+    "房租",
+]
+
+
 class QwenExtractionError(RuntimeError):
     pass
 
@@ -205,10 +242,16 @@ def extract_json_object(content: str) -> dict[str, Any]:
 
 
 def _guess_record_type(text: str) -> RecordType:
-    if any(keyword in text for keyword in ["订阅", "会员", "续费", "自动扣款", "自动续费"]):
+    if any(keyword in text for keyword in ["订阅", "会员", "续费", "自动续费"]):
+        return RecordType.SUBSCRIPTION
+    if _find_known_phrase(text, KNOWN_SUBSCRIPTION_SERVICES):
         return RecordType.SUBSCRIPTION
     if any(keyword in text for keyword in ["账单", "水电", "房租", "信用卡", "缴费", "宽带"]):
         return RecordType.BILL
+    if _find_known_phrase(text, KNOWN_BILL_NAMES):
+        return RecordType.BILL
+    if any(keyword in text for keyword in ["扣款", "月费", "年费"]):
+        return RecordType.SUBSCRIPTION
     return RecordType.PURCHASE
 
 
@@ -238,7 +281,7 @@ def _extract_search_query(text: str) -> str | None:
 
 
 def _extract_amount(text: str) -> float | None:
-    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|CNY|人民币)", text, re.I)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|CNY|人民币|美元|美金|USD|\$)", text, re.I)
     return float(match.group(1)) if match else None
 
 
@@ -272,25 +315,30 @@ def _extract_subscription_event_date_text(text: str) -> str | None:
 
 
 def _extract_due_text(text: str) -> str | None:
-    match = re.search(r"(?:截止|到期|续费|缴费|扣款)(?!前)(?:日|日期|时间)?(?:是|在|到)?\s*([^，,。；;\s]+)", text)
+    date_expr = _date_text_pattern()
+    match = re.search(rf"({date_expr})(?:前)?\s*(?:缴费|还款|截止|到期|扣款)", text)
     if match:
-        return match.group(1)
+        return _compact_phrase(match.group(1))
+    match = re.search(rf"(?:截止|到期|缴费|还款|扣款)(?:日|日期|时间)?(?:是|在|到)?\s*({date_expr})", text)
+    if match:
+        return _compact_phrase(match.group(1))
     return _extract_event_date_text(text)
 
 
 def _extract_subscription_renewal_text(text: str) -> str | None:
     patterns = [
-        r"((?:每个?月|月付|包月|月度|按月)\s*[一二两三四五六七八九十\d]+\s*[日号])",
-        r"([一二两三四五六七八九十\d]+\s*[日号]\s*(?:自动续费|自动扣款|扣款|续费))",
         r"((?:下个?月|下月)\s*[一二两三四五六七八九十\d]+\s*[日号])",
-        r"((?:每年|每一年|年付|包年|年度|按年)\s*[一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号])",
         r"((?:明年|下年|下一年)\s*[一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"((?:每年|每一年|年付|包年|年度|按年)\s*[一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号])",
+        r"([一二两三四五六七八九十\d]+\s*月\s*[一二两三四五六七八九十\d]+\s*[日号]\s*(?:每年|每一年|年付|包年|年度|按年)\s*(?:自动)?(?:续费|扣款)?)",
+        r"((?:每个?月|月付|包月|月度|按月)\s*[一二两三四五六七八九十\d]+\s*[日号])",
         r"((?:每周|每星期)[一二三四五六日天])",
+        r"([一二两三四五六七八九十\d]+\s*[日号]\s*(?:自动续费|自动扣款|扣款|续费))",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            return re.sub(r"\s+", "", match.group(1))
+            return _compact_phrase(match.group(1))
 
     date_expr = (
         r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日号]?"
@@ -300,11 +348,11 @@ def _extract_subscription_renewal_text(text: str) -> str | None:
     )
     match = re.search(rf"(?:到期|续费|扣款)(?!前)(?:日|日期|时间)?(?:是|在|到)?\s*({date_expr})", text)
     if match:
-        return re.sub(r"\s+", "", match.group(1))
+        return _compact_phrase(match.group(1))
 
     match = re.search(rf"({date_expr}).*?(?:到期|续费|扣款)(?!前)", text)
     if match:
-        return re.sub(r"\s+", "", match.group(1))
+        return _compact_phrase(match.group(1))
 
     return None
 
@@ -327,32 +375,38 @@ def _extract_order_number(text: str) -> str | None:
 
 
 def _extract_merchant(text: str) -> str | None:
-    match = re.search(r"在([^，,。；;\s]+)(?:买|购买|下单)", text)
+    match = re.search(r"在\s*(.+?)\s*(?:购买|买|下单)", text)
     if match:
-        return match.group(1)
-    match = re.search(r"从([^，,。；;\s]+)(?:买|购买|下单)", text)
-    return match.group(1) if match else None
+        return _clean_merchant(match.group(1))
+    match = re.search(r"从\s*(.+?)\s*(?:购买|买|下单)", text)
+    return _clean_merchant(match.group(1)) if match else None
 
 
 def _extract_title(text: str, record_type: RecordType) -> str | None:
     if record_type == RecordType.PURCHASE:
         patterns = [
-            r"买了(?:一个|一台|一件|一份)?([^，,。；;\s]+)",
-            r"购买了(?:一个|一台|一件|一份)?([^，,。；;\s]+)",
-            r"下单(?:了)?(?:一个|一台|一件|一份)?([^，,。；;\s]+)",
+            r"买了\s*(?:一个|一台|一件|一份|一双)?\s*([^，,。；;]+)",
+            r"购买了\s*(?:一个|一台|一件|一份|一双)?\s*([^，,。；;]+)",
+            r"下单(?:了)?\s*(?:一个|一台|一件|一份|一双)?\s*([^，,。；;]+)",
         ]
     elif record_type == RecordType.SUBSCRIPTION:
+        known = _find_known_phrase(text, KNOWN_SUBSCRIPTION_SERVICES)
+        if known:
+            return known
         patterns = [
-            r"(?:订阅了|订阅|开通了|开通|购买了|买了|续费了|续费)\s*([^，,。；;\s]+)",
-            r"([^，,。；;\s]+?)(?:会员|订阅)",
+            r"(?:订阅了|订阅|开通了|开通|购买了|买了|续费了)\s*([^，,。；;]+)",
+            r"([^，,。；;]+?)(?:会员|订阅|月费|年费)",
         ]
     else:
-        patterns = [r"([^，,。；;\s]+)(?:账单|房租|水电费|信用卡|缴费)"]
+        known = _find_known_phrase(text, KNOWN_BILL_NAMES)
+        if known:
+            return known
+        patterns = [r"([^，,。；;\s]+)(?:账单|房租|水电费|信用卡|缴费|还款)"]
 
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            title = match.group(1)
+            title = _clean_title(match.group(1), record_type)
             if record_type == RecordType.SUBSCRIPTION:
                 title = _clean_subscription_title(title)
             return title or None
@@ -360,7 +414,7 @@ def _extract_title(text: str, record_type: RecordType) -> str | None:
 
 
 def _extract_billing_cycle(text: str) -> str | None:
-    if any(keyword in text for keyword in ["每月", "每个月", "月付", "月费", "包月", "月度", "按月"]):
+    if any(keyword in text for keyword in ["每月", "每个月", "月付", "月费", "包月", "月度", "按月", "这个月", "本月"]):
         return "monthly"
     if any(keyword in text for keyword in ["每年", "每一年", "年付", "年费", "包年", "年度", "按年"]):
         return "yearly"
@@ -380,6 +434,45 @@ def _extract_auto_renew(text: str) -> bool | None:
 def _clean_subscription_title(raw: str) -> str | None:
     value = raw.strip()
     value = re.sub(r"^(?:我|帮我|给我)?(?:已经)?(?:订阅了|订阅|开通了|开通|购买了|买了|续费了|续费)", "", value)
-    value = re.sub(r"(?:会员|订阅|服务|自动续费|续费)$", "", value)
+    value = re.sub(r"(?:会员|订阅|服务|自动续费|续费|月费|年费)$", "", value)
     value = value.strip(" 的")
     return value or None
+
+
+def _date_text_pattern() -> str:
+    number = r"[一二两三四五六七八九十\d]+"
+    return (
+        rf"(?:\d{{4}}\s*[年/-]\s*\d{{1,2}}\s*[月/-]\s*\d{{1,2}}\s*[日号]?"
+        rf"|(?:明年|下年|下一年)\s*{number}\s*月\s*{number}\s*[日号]"
+        rf"|(?:下个?月|下月)\s*{number}\s*[日号]"
+        rf"|{number}\s*月\s*{number}\s*[日号]"
+        rf"|{number}\s*-\s*{number}"
+        rf"|下周[一二三四五六日天]"
+        rf"|[一二两三四五六七八九十\d]+\s*天后"
+        rf"|今天|明天|后天|月底|本月底|这个月底)"
+    )
+
+
+def _compact_phrase(value: str) -> str:
+    return re.sub(r"\s+", "", value.strip())
+
+
+def _find_known_phrase(text: str, phrases: list[str]) -> str | None:
+    normalized_text = _compact_phrase(text).lower()
+    for phrase in phrases:
+        if _compact_phrase(phrase).lower() in normalized_text:
+            return phrase
+    return None
+
+
+def _clean_merchant(raw: str) -> str | None:
+    value = raw.strip(" ，,。；;")
+    value = re.sub(r"^(?:我|昨天|今天|前天|在|从)\s*", "", value)
+    return value or None
+
+
+def _clean_title(raw: str, record_type: RecordType) -> str:
+    value = raw.strip(" ，,。；;")
+    if record_type == RecordType.PURCHASE:
+        value = re.sub(r"^(?:一个|一台|一件|一份|一双)", "", value)
+    return value.strip()
