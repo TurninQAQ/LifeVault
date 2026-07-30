@@ -39,7 +39,7 @@
 {"id":"bill_009","text":"医保缴费 380 元，12 月 31 日截止，提前 10 天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"医保","amount":380,"due_date_text":"12月31日","remind_before_days":10}}
 {"id":"bill_010","text":"学费账单 6000 元，9 月 1 日前缴费。","expected":{"intent":"create_record","record_type":"bill","title":"学费","amount":6000,"due_date_text":"9月1日"}}
 {"id":"bill_011","text":"房贷这个月 8200 元，月底前还款，提前三天提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"房贷","amount":8200,"due_date_text":"月底","remind_before_days":3}}
-{"id":"bill_012","text":"花呗账单 2300 元，下周五还款，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"花呗","amount":2300,"due_date_text":"下周五","remind_before_days":2}}
+{"id":"bill_012","text":"花呗账单 2300 元，下周五还款，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"花呗","amount":2300,"due_date_text":"下周五"}}
 {"id":"bill_013","text":"停车费 60 元，今天截止。","expected":{"intent":"create_record","record_type":"bill","title":"停车费","amount":60,"due_date_text":"今天"}}
 {"id":"bill_014","text":"健身房尾款 1200 元，三天后缴费。","expected":{"intent":"create_record","record_type":"bill","title":"健身房尾款","amount":1200,"due_date_text":"三天后"}}
 {"id":"bill_015","text":"保险账单 3999 元，明年 1 月 15 日截止，提前 7 天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"保险","amount":3999,"due_date_text":"明年1月15日","remind_before_days":7}}
@@ -57,4 +57,4 @@
 {"id":"missing_002","text":"我订阅了一个会员，每月 30 元，自动续费。","expected":{"intent":"create_record","record_type":"subscription","amount":30,"billing_cycle":"monthly","auto_renew":true}}
 {"id":"missing_003","text":"房租月底前缴费，提前两天提醒。","expected":{"intent":"create_record","record_type":"bill","title":"房租","due_date_text":"月底","remind_before_days":2}}
 {"id":"missing_004","text":"我买了一个键盘，订单号 K-001，七天无理由。","expected":{"intent":"create_record","record_type":"purchase","title":"键盘","order_number":"K-001","return_days":7}}
-{"id":"missing_005","text":"宽带下个月 1 号缴费，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"宽带","due_date_text":"下个月1号","remind_before_days":2}}
+{"id":"missing_005","text":"宽带下个月 1 号缴费，提醒我。","expected":{"intent":"create_record","record_type":"bill","title":"宽带","due_date_text":"下个月1号"}}

@@ -24,6 +24,8 @@ class McpServerTest(unittest.TestCase):
                 "snooze_reminder",
                 "cancel_reminder",
                 "list_audit_logs",
+                "get_preferences",
+                "update_preferences",
             }
             self.assertTrue(result["ok"])
             self.assertTrue(expected_tools.issubset(set(result["tools"])))
@@ -44,6 +46,10 @@ class McpServerTest(unittest.TestCase):
             self.assertEqual(result["updated_record_status"], "completed")
             self.assertGreaterEqual(result["audit_count"], 8)
             self.assertGreaterEqual(result["audit_rejected_count"], 3)
+            self.assertEqual(result["default_preference_time"], "09:00")
+            self.assertFalse(result["rejected_preferences"]["ok"])
+            self.assertEqual(result["updated_preference_time"], "07:30")
+            self.assertFalse(result["unchanged_preferences"])
 
 
 if __name__ == "__main__":

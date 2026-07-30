@@ -18,6 +18,8 @@ from lifevault.models.schemas import (
     ReminderCreate,
     ReminderStatus,
     UserPreference,
+    UserPreferencePatch,
+    UserPreferenceUpdateResult,
 )
 from lifevault.storage.database import connect, init_db
 
@@ -42,6 +44,15 @@ def _parse_date(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
 
 
+def _is_clock_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.strptime(value, "%H:%M").strftime("%H:%M") == value
+    except ValueError:
+        return False
+
+
 class VaultRepository:
     def __init__(self, database_path: Path):
         self.database_path = database_path
@@ -49,58 +60,98 @@ class VaultRepository:
 
     def get_preferences(self, user_id: str) -> UserPreference:
         with connect(self.database_path) as conn:
-            row = conn.execute(
+            return self._get_preferences_conn(conn, user_id)
+
+    def update_preferences(
+        self,
+        user_id: str,
+        patch: UserPreferencePatch,
+        actor: str = "mcp",
+    ) -> UserPreferenceUpdateResult:
+        with connect(self.database_path) as conn:
+            existing_row = conn.execute(
                 "SELECT * FROM user_preferences WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
-            if row:
-                return UserPreference(
-                    user_id=row["user_id"],
-                    default_time=row["default_time"],
-                    quiet_hours_start=row["quiet_hours_start"],
-                    quiet_hours_end=row["quiet_hours_end"],
-                    default_advance_days=row["default_advance_days"],
+            current = self._preference_from_row(existing_row, user_id)
+            updated_data = current.model_dump()
+            for field in patch.model_fields_set:
+                updated_data[field] = getattr(patch, field)
+            updated = UserPreference.model_validate(updated_data)
+            changed_fields = sorted(
+                field
+                for field in patch.model_fields_set
+                if getattr(current, field) != getattr(updated, field)
+            )
+            if not changed_fields:
+                return UserPreferenceUpdateResult(
+                    preference=current,
+                    changed=False,
                 )
 
-            preference = UserPreference(user_id=user_id)
-            conn.execute(
-                """
-                INSERT INTO user_preferences(
-                    user_id, default_time, quiet_hours_start, quiet_hours_end, default_advance_days
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    preference.user_id,
-                    preference.default_time,
-                    preference.quiet_hours_start,
-                    preference.quiet_hours_end,
-                    preference.default_advance_days,
-                ),
+            if existing_row:
+                assignments = ", ".join(f"{field} = ?" for field in changed_fields)
+                values = [getattr(updated, field) for field in changed_fields]
+                conn.execute(
+                    f"UPDATE user_preferences SET {assignments} WHERE user_id = ?",
+                    [*values, user_id],
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO user_preferences(
+                        user_id, default_time, quiet_hours_start, quiet_hours_end, default_advance_days
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        updated.user_id,
+                        updated.default_time,
+                        updated.quiet_hours_start,
+                        updated.quiet_hours_end,
+                        updated.default_advance_days,
+                    ),
+                )
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action="update_preferences",
+                target_id=None,
+                result="ok",
+                params={"changed_fields": changed_fields},
             )
-            return preference
+            return UserPreferenceUpdateResult(
+                preference=updated,
+                changed=True,
+                changed_fields=changed_fields,
+            )
 
-    def update_preferences(self, preference: UserPreference) -> UserPreference:
-        with connect(self.database_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO user_preferences(
-                    user_id, default_time, quiet_hours_start, quiet_hours_end, default_advance_days
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    default_time = excluded.default_time,
-                    quiet_hours_start = excluded.quiet_hours_start,
-                    quiet_hours_end = excluded.quiet_hours_end,
-                    default_advance_days = excluded.default_advance_days
-                """,
-                (
-                    preference.user_id,
-                    preference.default_time,
-                    preference.quiet_hours_start,
-                    preference.quiet_hours_end,
-                    preference.default_advance_days,
-                ),
-            )
-        return preference
+    def _get_preferences_conn(self, conn: Any, user_id: str) -> UserPreference:
+        row = conn.execute(
+            "SELECT * FROM user_preferences WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return self._preference_from_row(row, user_id)
+
+    def _preference_from_row(self, row: Any, user_id: str) -> UserPreference:
+        if not row:
+            return UserPreference(user_id=user_id)
+        default_time = row["default_time"] if _is_clock_text(row["default_time"]) else "09:00"
+        quiet_hours_start = row["quiet_hours_start"]
+        quiet_hours_end = row["quiet_hours_end"]
+        if not (_is_clock_text(quiet_hours_start) and _is_clock_text(quiet_hours_end)):
+            quiet_hours_start = None
+            quiet_hours_end = None
+        default_advance_days = row["default_advance_days"]
+        if not isinstance(default_advance_days, int) or not 0 <= default_advance_days <= 30:
+            default_advance_days = 2
+        return UserPreference(
+            user_id=row["user_id"],
+            default_time=default_time,
+            quiet_hours_start=quiet_hours_start,
+            quiet_hours_end=quiet_hours_end,
+            default_advance_days=default_advance_days,
+        )
 
     def save_record(
         self,

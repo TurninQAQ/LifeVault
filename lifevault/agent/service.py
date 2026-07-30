@@ -6,6 +6,8 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from pydantic import ValidationError
+
 from lifevault.config import Settings
 from lifevault.hooks.privacy_hooks import sanitize_input
 from lifevault.models.llm_factory import Extractor
@@ -19,6 +21,7 @@ from lifevault.models.schemas import (
     ReminderCreate,
     ReminderType,
     SaveResult,
+    UserPreference,
 )
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.storage.repository import VaultRepository
@@ -73,10 +76,11 @@ class LifeVaultAgent:
             self.repository.save_checkpoint(draft.thread_id, draft.model_dump(mode="json"))
             return draft
 
-        record = self._build_record(candidate, sanitized, now)
+        preference = self._get_preferences()
+        record = self._build_record(candidate, sanitized, now, preference)
         draft.record = record
         draft.duplicate_candidates = self.repository.find_duplicate(self.settings.default_user_id, record)
-        draft.reminder = self._build_reminder(candidate, record)
+        draft.reminder = self._build_reminder(candidate, record, preference)
         self.repository.save_checkpoint(draft.thread_id, draft.model_dump(mode="json"))
         return draft
 
@@ -194,6 +198,7 @@ class LifeVaultAgent:
         candidate: ExtractedRecordCandidate,
         sanitized_input: str,
         now: datetime,
+        preference: UserPreference,
     ) -> LifeRecordCreate:
         assert candidate.record_type is not None
         title = candidate.title or candidate.service_name or candidate.bill_name
@@ -222,7 +227,7 @@ class LifeVaultAgent:
             cycle = normalize_billing_cycle(candidate.billing_cycle)
             remind_before_days = candidate.remind_before_days
             if remind_before_days is None:
-                remind_before_days = self.repository.get_preferences(self.settings.default_user_id).default_advance_days
+                remind_before_days = preference.default_advance_days
             details = {
                 "service_name": candidate.service_name or title,
                 "billing_cycle": cycle,
@@ -262,10 +267,10 @@ class LifeVaultAgent:
         self,
         candidate: ExtractedRecordCandidate,
         record: LifeRecordCreate,
+        preference: UserPreference,
     ) -> ReminderCreate | None:
         if not record.deadline:
             return None
-        preference = self.repository.get_preferences(self.settings.default_user_id)
         before_days = candidate.remind_before_days
         if before_days is None:
             before_days = preference.default_advance_days
@@ -288,6 +293,15 @@ class LifeVaultAgent:
             reminder_type=reminder_type,
             message=message,
         )
+
+    def _get_preferences(self) -> UserPreference:
+        result = self.mcp_client.get_preferences()
+        if not result.get("ok"):
+            raise RuntimeError(_mcp_error_message("get_preferences", result))
+        try:
+            return UserPreference.model_validate(result["preference"])
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise RuntimeError("MCP get_preferences returned an invalid response.") from exc
 
     def _build_reminder_message(self, record: LifeRecordCreate, before_days: int) -> str:
         if record.record_type == RecordType.PURCHASE:

@@ -14,6 +14,7 @@ from lifevault.models.schemas import (
     ReminderCreate,
     ReminderStatus,
     ReminderType,
+    UserPreferencePatch,
 )
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import now_in_timezone
@@ -32,7 +33,7 @@ def create_server(
         log_level="ERROR",
         instructions=(
             "Local-first LifeVault data boundary. Tools operate on the configured local user only. "
-            "Write operations validate arguments, use idempotency keys, and return JSON objects."
+            "Write operations validate arguments, require confirmation where configured, and return JSON objects."
         ),
     )
 
@@ -139,6 +140,14 @@ def create_server(
         except ValueError as exc:
             return _fail("get_record_failed", str(exc))
 
+    @mcp.tool(description="Get reminder and quiet-hours preferences for the configured local user.")
+    def get_preferences() -> dict[str, Any]:
+        try:
+            preference = repo.get_preferences(user_id)
+            return _ok(preference=_model(preference))
+        except Exception:
+            return _fail("get_preferences_failed", "Tool execution failed.")
+
     @mcp.tool(description="Find possible duplicate records.")
     def find_duplicate(
         record: dict[str, Any] | None = None,
@@ -214,6 +223,56 @@ def create_server(
                 params={"new_status": new_status},
             )
             return _fail("update_record_status_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Update selected preferences after explicit user confirmation.")
+    def update_preferences(
+        preferences: dict[str, Any],
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        requested_fields = list(preferences)
+        audit_params = {"changed_fields": requested_fields}
+        if not user_confirmed:
+            audit_mcp_failure(
+                "update_preferences",
+                "rejected",
+                "confirmation_required",
+                params=audit_params,
+            )
+            return _fail("confirmation_required", "Updating preferences requires user confirmation.")
+        try:
+            patch = UserPreferencePatch.model_validate(preferences)
+        except ValidationError as exc:
+            audit_mcp_failure(
+                "update_preferences",
+                "rejected",
+                "invalid_preferences",
+                params=audit_params,
+            )
+            return _fail("update_preferences_failed", str(exc))
+        audit_params = {"changed_fields": sorted(patch.model_fields_set)}
+        try:
+            outcome = repo.update_preferences(user_id, patch, actor="mcp")
+            return _ok(
+                preference=_model(outcome.preference),
+                changed=outcome.changed,
+                changed_fields=outcome.changed_fields,
+            )
+        except ValueError as exc:
+            audit_mcp_failure(
+                "update_preferences",
+                "failed",
+                "update_preferences_failed",
+                params=audit_params,
+            )
+            return _fail("update_preferences_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "update_preferences",
+                "failed",
+                "internal_error",
+                params=audit_params,
+            )
+            return _fail("update_preferences_failed", "Tool execution failed.")
 
     @mcp.tool(description="Create a reminder task after user confirmation.")
     def create_reminder(

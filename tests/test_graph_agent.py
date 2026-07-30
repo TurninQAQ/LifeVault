@@ -106,11 +106,12 @@ class GraphAgentTest(unittest.TestCase):
             turn = agent.resume(turn.thread_id, {"action": "confirm"})
 
             self.assertEqual(turn.status, "completed")
-            self.assertEqual(mcp_client.calls[0][0], "find_duplicate")
-            self.assertEqual(mcp_client.calls[1][0], "save_record")
-            self.assertTrue(mcp_client.calls[1][1]["user_confirmed"])
-            self.assertEqual(mcp_client.calls[2][0], "create_reminder")
+            self.assertEqual(mcp_client.calls[0][0], "get_preferences")
+            self.assertEqual(mcp_client.calls[1][0], "find_duplicate")
+            self.assertEqual(mcp_client.calls[2][0], "save_record")
             self.assertTrue(mcp_client.calls[2][1]["user_confirmed"])
+            self.assertEqual(mcp_client.calls[3][0], "create_reminder")
+            self.assertTrue(mcp_client.calls[3][1]["user_confirmed"])
             self.assertEqual(len(repo.search_records(settings.default_user_id, query="显示器")), 1)
             agent.close()
 
@@ -159,7 +160,10 @@ class GraphAgentTest(unittest.TestCase):
 
             turn = agent.resume(turn.thread_id, {"action": "confirm"})
             self.assertEqual(turn.status, "completed")
-            self.assertEqual([call[0] for call in mcp_client.calls], ["find_duplicate", "save_record", "create_reminder"])
+            self.assertEqual(
+                [call[0] for call in mcp_client.calls],
+                ["get_preferences", "find_duplicate", "save_record", "create_reminder"],
+            )
 
             records = repo.search_records(settings.default_user_id, query="腾讯视频")
             self.assertEqual(len(records), 1)
@@ -179,6 +183,9 @@ class RecordingMcpClient:
 
     def find_duplicate(self, record: dict, limit: int = 5) -> dict:
         return self.call_tool("find_duplicate", {"record": record, "limit": limit})
+
+    def get_preferences(self) -> dict:
+        return self.call_tool("get_preferences", {})
 
     def save_record(
         self,
@@ -227,6 +234,18 @@ class RejectSaveMcpClient:
 
     def find_duplicate(self, record: dict, limit: int = 5) -> dict:
         return {"ok": True, "duplicate_candidates": []}
+
+    def get_preferences(self) -> dict:
+        return {
+            "ok": True,
+            "preference": {
+                "user_id": "local",
+                "default_time": "09:00",
+                "quiet_hours_start": None,
+                "quiet_hours_end": None,
+                "default_advance_days": 2,
+            },
+        }
 
     def save_record(
         self,

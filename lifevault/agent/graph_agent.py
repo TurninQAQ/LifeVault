@@ -56,8 +56,8 @@ class GraphAgent:
     ):
         self.settings = settings
         self.repository = repository or VaultRepository(settings.database_path)
-        self.service = LifeVaultAgent(settings, self.repository)
         self.mcp_client = mcp_client or InProcessPersonalVaultMcpClient(settings, self.repository)
+        self.service = LifeVaultAgent(settings, self.repository, mcp_client=self.mcp_client)
         settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self._checkpoint_conn = sqlite3.connect(
             settings.langgraph_checkpoint_path,
@@ -216,7 +216,14 @@ class GraphAgent:
     def _prepare_record_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
         now = now_in_timezone(self.settings.default_timezone)
         candidate = ExtractedRecordCandidate.model_validate(state["candidate"])
-        record = self.service._build_record(candidate, state["sanitized_input"], now)
+        try:
+            preference = self.service._get_preferences()
+        except RuntimeError as exc:
+            return {
+                "cancelled": True,
+                "errors": [*state.get("errors", []), str(exc)],
+            }
+        record = self.service._build_record(candidate, state["sanitized_input"], now, preference)
         duplicate_result = self.mcp_client.find_duplicate(record.model_dump(mode="json"))
         if not duplicate_result.get("ok"):
             return {
@@ -225,7 +232,7 @@ class GraphAgent:
                 "errors": [*state.get("errors", []), _mcp_error_message("find_duplicate", duplicate_result)],
             }
         duplicates = duplicate_result.get("duplicate_candidates", [])
-        reminder = self.service._build_reminder(candidate, record)
+        reminder = self.service._build_reminder(candidate, record, preference)
         return {
             "record": record.model_dump(mode="json"),
             "duplicate_candidates": duplicates,

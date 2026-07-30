@@ -5,12 +5,103 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
-from lifevault.models.schemas import LifeRecordCreate, RecordStatus, RecordType, ReminderCreate, ReminderStatus, ReminderType
+from pydantic import ValidationError
+
+from lifevault.models.schemas import (
+    LifeRecordCreate,
+    RecordStatus,
+    RecordType,
+    ReminderCreate,
+    ReminderStatus,
+    ReminderType,
+    UserPreferencePatch,
+)
+from lifevault.storage.database import connect
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import calculate_reminder_at, parse_date_text
 
 
 class RepositoryTest(unittest.TestCase):
+    def test_preferences_are_partial_idempotent_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "test.db"
+            repo = VaultRepository(database_path)
+
+            default = repo.get_preferences("local")
+            self.assertEqual(default.default_time, "09:00")
+            with connect(database_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM user_preferences").fetchone()[0]
+            self.assertEqual(count, 0)
+
+            changed = repo.update_preferences(
+                "local",
+                UserPreferencePatch(
+                    default_time="07:30",
+                    quiet_hours_start="22:00",
+                    quiet_hours_end="08:00",
+                ),
+            )
+            self.assertTrue(changed.changed)
+            self.assertEqual(
+                changed.changed_fields,
+                ["default_time", "quiet_hours_end", "quiet_hours_start"],
+            )
+            self.assertEqual(changed.preference.default_advance_days, 2)
+
+            unchanged = repo.update_preferences(
+                "local",
+                UserPreferencePatch(default_time="07:30"),
+            )
+            self.assertFalse(unchanged.changed)
+            self.assertEqual(unchanged.changed_fields, [])
+            logs = repo.list_audit_logs("local", action="update_preferences")
+            self.assertEqual(len(logs), 1)
+            self.assertIn("changed_fields", logs[0].params_summary or "")
+            self.assertNotIn("07:30", logs[0].params_summary or "")
+            self.assertNotIn("22:00", logs[0].params_summary or "")
+
+    def test_preference_patch_rejects_invalid_or_incomplete_values(self) -> None:
+        invalid_patches = [
+            {},
+            {"default_time": "7:30"},
+            {"default_time": None},
+            {"default_advance_days": 31},
+            {"quiet_hours_start": "22:00"},
+            {"quiet_hours_start": None, "quiet_hours_end": "08:00"},
+        ]
+        for patch in invalid_patches:
+            with self.subTest(patch=patch), self.assertRaises(ValidationError):
+                UserPreferencePatch.model_validate(patch)
+
+    def test_partial_preference_update_does_not_rewrite_legacy_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "test.db"
+            repo = VaultRepository(database_path)
+            with connect(database_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_preferences(
+                        user_id, default_time, quiet_hours_start, quiet_hours_end, default_advance_days
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("local", "09:00", "legacy-invalid", "08:00", 2),
+                )
+
+            result = repo.update_preferences(
+                "local",
+                UserPreferencePatch(default_time="07:30"),
+            )
+
+            self.assertTrue(result.changed)
+            self.assertIsNone(result.preference.quiet_hours_start)
+            with connect(database_path) as conn:
+                row = conn.execute(
+                    "SELECT quiet_hours_start, quiet_hours_end FROM user_preferences WHERE user_id = ?",
+                    ("local",),
+                ).fetchone()
+            self.assertEqual(row["quiet_hours_start"], "legacy-invalid")
+            self.assertEqual(row["quiet_hours_end"], "08:00")
+
     def test_idempotent_record_and_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = VaultRepository(Path(tmp) / "test.db")

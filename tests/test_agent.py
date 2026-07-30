@@ -6,6 +6,7 @@ from pathlib import Path
 
 from lifevault.agent.service import LifeVaultAgent
 from lifevault.config import Settings
+from lifevault.models.schemas import ExtractedRecordCandidate, UserPreferencePatch
 from lifevault.storage.repository import VaultRepository
 
 
@@ -64,6 +65,28 @@ class AgentTest(unittest.TestCase):
             self.assertEqual(records[0].title, "耳机")
             self.assertIn("耳机", answer)
             self.assertEqual(mcp_client.calls, [("search_records", {"query": "耳机", "record_types": ["purchase"], "limit": 20})])
+
+    def test_agent_reads_reminder_defaults_through_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(database_path=Path(tmp) / "test.db", use_qwen=False)
+            repo = VaultRepository(settings.database_path)
+            repo.update_preferences(
+                settings.default_user_id,
+                UserPreferencePatch(default_time="07:30", default_advance_days=4),
+                actor="user",
+            )
+            agent = LifeVaultAgent(settings, repo)
+
+            draft = agent.create_draft(
+                "房租 1000 元，2026-08-01 前交，提醒我。"
+            )
+
+            self.assertEqual(draft.reminder.scheduled_at.isoformat(), "2026-07-28T07:30:00+08:00")
+
+    def test_model_tool_plan_cannot_update_preferences(self) -> None:
+        candidate = ExtractedRecordCandidate(tool_plan=["update_preferences"])
+
+        self.assertEqual(candidate.tool_plan, [])
 
 
 class SearchRecordingMcpClient:

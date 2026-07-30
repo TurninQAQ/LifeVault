@@ -8,7 +8,7 @@ import streamlit as st
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
-from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus, UserPreference
+from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
 from lifevault.storage.repository import VaultRepository
 
 
@@ -16,15 +16,15 @@ st.set_page_config(page_title="LifeVault", page_icon="LV", layout="wide")
 
 
 @st.cache_resource
-def get_services() -> tuple[GraphAgent, VaultRepository, PersonalVaultMcpClient]:
+def get_services() -> tuple[GraphAgent, PersonalVaultMcpClient]:
     settings = get_settings()
     repository = VaultRepository(settings.database_path)
     mcp_client = InProcessPersonalVaultMcpClient(settings, repository)
-    return GraphAgent(settings, repository, mcp_client=mcp_client), repository, mcp_client
+    return GraphAgent(settings, repository, mcp_client=mcp_client), mcp_client
 
 
 def main() -> None:
-    agent, repository, mcp_client = get_services()
+    agent, mcp_client = get_services()
     settings = get_settings()
 
     st.title("LifeVault")
@@ -45,7 +45,7 @@ def main() -> None:
         render_audit(mcp_client)
 
     with tab_settings:
-        render_settings(repository, settings.default_user_id)
+        render_settings(mcp_client)
 
 
 def render_add_record(agent: GraphAgent) -> None:
@@ -237,6 +237,7 @@ def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
             "snooze_reminder",
             "cancel_reminder",
             "send_reminder",
+            "update_preferences",
         ],
         key="audit_action",
     )
@@ -274,23 +275,61 @@ def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
     st.dataframe(rows, width="stretch", hide_index=True)
 
 
-def render_settings(repository: VaultRepository, user_id: str) -> None:
-    preference = repository.get_preferences(user_id)
-    default_time = st.text_input("默认提醒时间", value=preference.default_time)
-    default_advance_days = st.number_input("默认提前天数", min_value=0, max_value=30, value=preference.default_advance_days)
-    quiet_start = st.text_input("免打扰开始", value=preference.quiet_hours_start or "")
-    quiet_end = st.text_input("免打扰结束", value=preference.quiet_hours_end or "")
-    if st.button("保存设置", type="primary"):
-        repository.update_preferences(
-            UserPreference(
-                user_id=user_id,
-                default_time=default_time,
-                default_advance_days=int(default_advance_days),
-                quiet_hours_start=quiet_start or None,
-                quiet_hours_end=quiet_end or None,
-            )
+def render_settings(mcp_client: PersonalVaultMcpClient) -> None:
+    result = mcp_client.get_preferences()
+    if not render_mcp_error("get_preferences", result):
+        return
+    preference = result["preference"]
+    quiet_enabled_value = bool(preference.get("quiet_hours_start") and preference.get("quiet_hours_end"))
+
+    with st.form("preferences_form"):
+        default_time = st.time_input(
+            "默认提醒时间",
+            value=time.fromisoformat(preference["default_time"]),
+            step=60,
         )
+        default_advance_days = st.number_input(
+            "默认提前天数",
+            min_value=0,
+            max_value=30,
+            value=int(preference["default_advance_days"]),
+        )
+        quiet_enabled = st.checkbox("启用免打扰", value=quiet_enabled_value)
+        quiet_columns = st.columns(2)
+        quiet_start = quiet_columns[0].time_input(
+            "免打扰开始",
+            value=time.fromisoformat(preference["quiet_hours_start"])
+            if preference.get("quiet_hours_start")
+            else time(hour=22),
+            step=60,
+            disabled=not quiet_enabled,
+        )
+        quiet_end = quiet_columns[1].time_input(
+            "免打扰结束",
+            value=time.fromisoformat(preference["quiet_hours_end"])
+            if preference.get("quiet_hours_end")
+            else time(hour=8),
+            step=60,
+            disabled=not quiet_enabled,
+        )
+        submitted = st.form_submit_button("保存设置", type="primary")
+
+    if not submitted:
+        return
+    patch = {
+        "default_time": default_time.strftime("%H:%M"),
+        "default_advance_days": int(default_advance_days),
+        "quiet_hours_start": quiet_start.strftime("%H:%M") if quiet_enabled else None,
+        "quiet_hours_end": quiet_end.strftime("%H:%M") if quiet_enabled else None,
+    }
+    update_result = mcp_client.update_preferences(patch, user_confirmed=True)
+    if not render_mcp_error("update_preferences", update_result):
+        return
+    if update_result["changed"]:
         st.success("设置已保存")
+    else:
+        st.info("设置没有变化")
+    st.json(update_result["preference"])
 
 
 def render_mcp_error(tool_name: str, result: dict) -> bool:

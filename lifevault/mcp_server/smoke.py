@@ -37,6 +37,40 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                 tool_names = sorted(tool.name for tool in listed.tools)
                 run_id = uuid4().hex[:8]
 
+                default_preferences = await call_json(session, "get_preferences", {})
+                require_ok("get_preferences", default_preferences)
+                rejected_preferences = await call_json(
+                    session,
+                    "update_preferences",
+                    {
+                        "preferences": {"default_time": "07:30"},
+                        "user_confirmed": False,
+                    },
+                )
+                updated_preferences = await call_json(
+                    session,
+                    "update_preferences",
+                    {
+                        "preferences": {
+                            "default_time": "07:30",
+                            "default_advance_days": 4,
+                            "quiet_hours_start": "22:00",
+                            "quiet_hours_end": "08:00",
+                        },
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("update_preferences", updated_preferences)
+                unchanged_preferences = await call_json(
+                    session,
+                    "update_preferences",
+                    {
+                        "preferences": {"default_time": "07:30"},
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("update_preferences unchanged", unchanged_preferences)
+
                 record_payload = {
                     "record_type": "purchase",
                     "title": f"MCP 测试耳机 {run_id}",
@@ -181,6 +215,10 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "ok": True,
                     "database_path": str(database_path),
                     "tools": tool_names,
+                    "default_preference_time": default_preferences["preference"]["default_time"],
+                    "rejected_preferences": rejected_preferences,
+                    "updated_preference_time": updated_preferences["preference"]["default_time"],
+                    "unchanged_preferences": unchanged_preferences["changed"],
                     "record_id": record_id,
                     "upcoming_subscription_count": len(upcoming_subscriptions["records"]),
                     "search_count": len(search_result["records"]),

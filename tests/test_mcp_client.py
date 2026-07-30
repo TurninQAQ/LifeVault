@@ -168,6 +168,61 @@ class McpClientTest(unittest.TestCase):
             self.assertEqual(len(upcoming["records"]), 1)
             self.assertEqual(upcoming["records"][0]["title"], "MCP Client 会员")
 
+    def test_preferences_require_confirmation_and_are_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(database_path=Path(tmp) / "mcp-client.db", use_qwen=False)
+            repo = VaultRepository(settings.database_path)
+            client = InProcessPersonalVaultMcpClient(settings, repo)
+
+            current = client.get_preferences()
+            self.assertTrue(current["ok"])
+            self.assertEqual(current["preference"]["default_time"], "09:00")
+
+            rejected = client.update_preferences(
+                {"default_time": "PRIVATE-TIME"},
+                user_confirmed=False,
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], "confirmation_required")
+
+            invalid = client.update_preferences(
+                {"quiet_hours_start": "22:00"},
+                user_confirmed=True,
+            )
+            self.assertFalse(invalid["ok"])
+            self.assertEqual(invalid["error"]["code"], "update_preferences_failed")
+
+            changed = client.update_preferences(
+                {
+                    "default_time": "07:30",
+                    "default_advance_days": 4,
+                    "quiet_hours_start": "22:00",
+                    "quiet_hours_end": "08:00",
+                },
+                user_confirmed=True,
+            )
+            self.assertTrue(changed["ok"])
+            self.assertTrue(changed["changed"])
+            self.assertEqual(changed["preference"]["default_time"], "07:30")
+
+            unchanged = client.update_preferences(
+                {"default_time": "07:30"},
+                user_confirmed=True,
+            )
+            self.assertTrue(unchanged["ok"])
+            self.assertFalse(unchanged["changed"])
+
+            audit = client.list_audit_logs(action="update_preferences")
+            self.assertTrue(audit["ok"])
+            self.assertEqual(
+                sum(log["result"] == "ok" for log in audit["audit_logs"]),
+                1,
+            )
+            summaries = " ".join(log.get("params_summary") or "" for log in audit["audit_logs"])
+            self.assertIn("changed_fields", summaries)
+            for sensitive_value in ["PRIVATE-TIME", "07:30", "22:00", "08:00"]:
+                self.assertNotIn(sensitive_value, summaries)
+
 
 if __name__ == "__main__":
     unittest.main()

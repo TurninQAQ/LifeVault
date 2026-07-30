@@ -18,6 +18,7 @@ AUDIT_PARAM_ALLOWLIST = {
     "snooze_reminder": frozenset({"new_reminder_id", "new_scheduled_at", "error_code"}),
     "cancel_reminder": frozenset({"record_status", "error_code"}),
     "send_reminder": frozenset({"delivery", "record_status", "error_code"}),
+    "update_preferences": frozenset({"changed_fields", "error_code"}),
 }
 AUDIT_ENUM_VALUES = {
     "record_type": frozenset({"purchase", "subscription", "bill"}),
@@ -29,6 +30,14 @@ AUDIT_ENUM_VALUES = {
     "delivery": frozenset({"desktop", "console"}),
 }
 AUDIT_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+AUDIT_PREFERENCE_FIELDS = frozenset(
+    {
+        "default_time",
+        "default_advance_days",
+        "quiet_hours_start",
+        "quiet_hours_end",
+    }
+)
 
 
 def sanitize_input(text: str, max_chars: int) -> str:
@@ -54,7 +63,7 @@ def sanitize_audit_params(action: str, params: dict[str, Any] | str | None) -> s
             return None
         params = parsed
 
-    safe: dict[str, str | int | float | bool] = {}
+    safe: dict[str, Any] = {}
     for key, value in params.items():
         if key not in allowed or value is None:
             continue
@@ -78,7 +87,7 @@ def sanitize_audit_target_id(target_id: str | None) -> str | None:
         return None
 
 
-def _audit_value(key: str, value: Any) -> str | int | float | bool | None:
+def _audit_value(key: str, value: Any) -> str | int | float | bool | list[str] | None:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if key in AUDIT_ENUM_VALUES:
@@ -99,4 +108,14 @@ def _audit_value(key: str, value: Any) -> str | int | float | bool | None:
             return str(UUID(value))
         except ValueError:
             return None
+    if key == "changed_fields":
+        if not isinstance(value, list):
+            return None
+        return sorted(
+            {
+                field
+                for field in value
+                if isinstance(field, str) and field in AUDIT_PREFERENCE_FIELDS
+            }
+        )
     return None

@@ -14,8 +14,9 @@ from lifevault.models.schemas import (
     ReminderCreate,
     ReminderStatus,
     ReminderType,
-    UserPreference,
+    UserPreferencePatch,
 )
+from lifevault.storage.database import connect
 from lifevault.storage.repository import VaultRepository
 from lifevault.worker.reminder_worker import ReminderWorker, quiet_hours_resume_at
 
@@ -118,11 +119,12 @@ class ReminderWorkerTest(unittest.TestCase):
             now = datetime(2026, 7, 27, 23, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
             _record_id, reminder_id = create_due_reminder(repo, now)
             repo.update_preferences(
-                UserPreference(
-                    user_id=settings.default_user_id,
+                settings.default_user_id,
+                UserPreferencePatch(
                     quiet_hours_start="22:00",
                     quiet_hours_end="08:00",
-                )
+                ),
+                actor="worker",
             )
             desktop = RecordingProvider()
             worker = ReminderWorker(settings, repo, desktop_provider=desktop, console_provider=RecordingProvider())
@@ -143,13 +145,15 @@ class ReminderWorkerTest(unittest.TestCase):
             settings, repo = make_repo(tmp)
             now = aware_now()
             _record_id, reminder_id = create_due_reminder(repo, now)
-            repo.update_preferences(
-                UserPreference(
-                    user_id=settings.default_user_id,
-                    quiet_hours_start="bad",
-                    quiet_hours_end="08:00",
+            with connect(repo.database_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_preferences(
+                        user_id, default_time, quiet_hours_start, quiet_hours_end, default_advance_days
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (settings.default_user_id, "09:00", "bad", "08:00", 2),
                 )
-            )
             desktop = RecordingProvider()
             worker = ReminderWorker(settings, repo, desktop_provider=desktop, console_provider=RecordingProvider())
 

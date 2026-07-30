@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 
 class RecordType(str, Enum):
@@ -202,3 +202,53 @@ class UserPreference(BaseModel):
     quiet_hours_start: str | None = None
     quiet_hours_end: str | None = None
     default_advance_days: int = 2
+
+
+class UserPreferencePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_time: str | None = None
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str | None = None
+    default_advance_days: StrictInt | None = Field(default=None, ge=0, le=30)
+
+    @field_validator("default_time", "quiet_hours_start", "quiet_hours_end")
+    @classmethod
+    def validate_clock(cls, value: str | None, info: Any) -> str | None:
+        if value is None:
+            if info.field_name == "default_time":
+                raise ValueError("default_time cannot be null.")
+            return None
+        parts = value.split(":")
+        if len(parts) != 2 or any(len(part) != 2 or not part.isdigit() for part in parts):
+            raise ValueError(f"{info.field_name} must use HH:MM.")
+        hour, minute = (int(part) for part in parts)
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError(f"{info.field_name} must use HH:MM.")
+        return value
+
+    @field_validator("default_advance_days")
+    @classmethod
+    def validate_advance_days(cls, value: int | None) -> int:
+        if value is None:
+            raise ValueError("default_advance_days cannot be null.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> UserPreferencePatch:
+        fields = self.model_fields_set
+        if not fields:
+            raise ValueError("At least one preference field is required.")
+        quiet_start_set = "quiet_hours_start" in fields
+        quiet_end_set = "quiet_hours_end" in fields
+        if quiet_start_set != quiet_end_set:
+            raise ValueError("quiet_hours_start and quiet_hours_end must be updated together.")
+        if quiet_start_set and ((self.quiet_hours_start is None) != (self.quiet_hours_end is None)):
+            raise ValueError("Quiet hours must be set or cleared together.")
+        return self
+
+
+class UserPreferenceUpdateResult(BaseModel):
+    preference: UserPreference
+    changed: bool
+    changed_fields: list[str] = Field(default_factory=list)

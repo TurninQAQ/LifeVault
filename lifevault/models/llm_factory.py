@@ -109,8 +109,6 @@ class FallbackExtractor:
         amount = _extract_amount(text)
         reminder_requested = any(keyword in text for keyword in ["提醒", "到期", "续费前", "截止前"])
         remind_before_days = _extract_remind_before_days(text)
-        if reminder_requested and remind_before_days is None:
-            remind_before_days = 2
 
         common: dict[str, Any] = {
             "intent": "create_record",

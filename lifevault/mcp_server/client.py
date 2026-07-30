@@ -30,6 +30,9 @@ class PersonalVaultMcpClient(Protocol):
     def get_record(self, record_id: str) -> dict[str, Any]:
         ...
 
+    def get_preferences(self) -> dict[str, Any]:
+        ...
+
     def save_record(
         self,
         record: dict[str, Any],
@@ -78,6 +81,13 @@ class PersonalVaultMcpClient(Protocol):
     def update_record_status(self, record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
         ...
 
+    def update_preferences(
+        self,
+        preferences: dict[str, Any],
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        ...
+
     def cancel_reminder(self, reminder_id: str, user_confirmed: bool) -> dict[str, Any]:
         ...
 
@@ -116,6 +126,9 @@ class InProcessPersonalVaultMcpClient:
 
     def get_record(self, record_id: str) -> dict[str, Any]:
         return self.call_tool("get_record", {"record_id": record_id})
+
+    def get_preferences(self) -> dict[str, Any]:
+        return self.call_tool("get_preferences", {})
 
     def save_record(
         self,
@@ -210,6 +223,19 @@ class InProcessPersonalVaultMcpClient:
                 "record_id": record_id,
                 "new_status": new_status,
                 "expected_version": expected_version,
+            },
+        )
+
+    def update_preferences(
+        self,
+        preferences: dict[str, Any],
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "update_preferences",
+            {
+                "preferences": preferences,
+                "user_confirmed": user_confirmed,
             },
         )
 

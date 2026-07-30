@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-from lifevault.models.schemas import LifeRecordCreate, RecordType
+from lifevault.models.schemas import LifeRecordCreate, RecordType, UserPreferencePatch
 from lifevault.storage.database import connect
 from lifevault.storage.repository import VaultRepository
 
@@ -43,6 +43,17 @@ class AuditRepositoryTest(unittest.TestCase):
                 )
 
             self.assertEqual(repo.search_records("local"), [])
+
+    def test_audit_failure_rolls_back_preference_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = FailingAuditRepository(Path(tmp) / "audit.db")
+            with self.assertRaises(RuntimeError):
+                repo.update_preferences(
+                    "local",
+                    UserPreferencePatch(default_time="07:30"),
+                )
+
+            self.assertEqual(repo.get_preferences("local").default_time, "09:00")
 
     def test_query_filters_user_scope_and_cursor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

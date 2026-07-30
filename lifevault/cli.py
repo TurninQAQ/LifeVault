@@ -64,6 +64,17 @@ def main() -> None:
     audit.add_argument("--limit", type=int, default=50)
     audit.add_argument("--json", action="store_true", help="Print the MCP response as JSON")
 
+    preferences = sub.add_parser("preferences", help="View or update reminder preferences")
+    preferences_sub = preferences.add_subparsers(dest="preferences_action", required=True)
+    preferences_sub.add_parser("show", help="Show current preferences")
+    preferences_set = preferences_sub.add_parser("set", help="Update selected preferences")
+    preferences_set.add_argument("--default-time", default=None)
+    preferences_set.add_argument("--advance-days", type=int, default=None)
+    preferences_set.add_argument("--quiet-start", default=None)
+    preferences_set.add_argument("--quiet-end", default=None)
+    preferences_set.add_argument("--clear-quiet-hours", action="store_true")
+    preferences_set.add_argument("--yes", action="store_true", help="Confirm the preference update")
+
     snooze = sub.add_parser("snooze-reminder", help="Snooze a reminder")
     snooze.add_argument("reminder_id")
     snooze_group = snooze.add_mutually_exclusive_group()
@@ -227,6 +238,41 @@ def main() -> None:
             )
         return
 
+    if args.command == "preferences":
+        if args.preferences_action == "show":
+            result = mcp_client.get_preferences()
+            preference = require_mcp_ok("get_preferences", result)["preference"]
+            print_preferences(preference)
+            return
+
+        patch: dict[str, Any] = {}
+        if args.default_time is not None:
+            patch["default_time"] = args.default_time
+        if args.advance_days is not None:
+            patch["default_advance_days"] = args.advance_days
+        quiet_values_supplied = args.quiet_start is not None or args.quiet_end is not None
+        if args.clear_quiet_hours and quiet_values_supplied:
+            raise SystemExit("--clear-quiet-hours cannot be combined with --quiet-start or --quiet-end")
+        if quiet_values_supplied and (args.quiet_start is None or args.quiet_end is None):
+            raise SystemExit("--quiet-start and --quiet-end must be provided together")
+        if args.clear_quiet_hours:
+            patch["quiet_hours_start"] = None
+            patch["quiet_hours_end"] = None
+        elif quiet_values_supplied:
+            patch["quiet_hours_start"] = args.quiet_start
+            patch["quiet_hours_end"] = args.quiet_end
+        if not patch:
+            raise SystemExit("No preference fields were provided.")
+        if not args.yes and not ask_yes_no("更新这些偏好？"):
+            print("Preference update cancelled.")
+            return
+
+        result = mcp_client.update_preferences(patch, user_confirmed=True)
+        outcome = require_mcp_ok("update_preferences", result)
+        print("Preferences updated." if outcome["changed"] else "Preferences unchanged.")
+        print_preferences(outcome["preference"])
+        return
+
     if args.command == "snooze-reminder":
         scheduled_at = parse_snooze_scheduled_at(args.at, args.minutes, settings.default_timezone)
         result = mcp_client.snooze_reminder(args.reminder_id, scheduled_at.isoformat())
@@ -309,6 +355,13 @@ def print_json(data: dict[str, Any]) -> None:
     import json
 
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def print_preferences(preference: dict[str, Any]) -> None:
+    print(f"default_time: {preference['default_time']}")
+    print(f"default_advance_days: {preference['default_advance_days']}")
+    print(f"quiet_hours_start: {preference.get('quiet_hours_start') or '-'}")
+    print(f"quiet_hours_end: {preference.get('quiet_hours_end') or '-'}")
 
 
 def require_mcp_ok(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:

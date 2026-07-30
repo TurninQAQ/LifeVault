@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.10 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.11 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -63,6 +63,15 @@ v0.10 makes state-changing tool calls and reminder delivery auditable:
 - CLI `audit` and the Streamlit audit tab read through MCP instead of accessing SQLite directly.
 - Audit records are append-only in v0.10; editing, deletion, export, cleanup, and retention policies are intentionally out of scope.
 
+v0.11 closes the user-preference Memory boundary:
+
+- MCP `get_preferences` and `update_preferences` expose default reminder time, default advance days, and optional quiet hours for the configured local user.
+- Preference updates are partial, strictly validated, require explicit confirmation, and return the complete current preference plus `changed` and `changed_fields`.
+- Actual changes and their audit event share one SQLite transaction. No-op updates do not write data or audit noise, and audit summaries contain field names rather than schedule values.
+- Agent reminder planning reads defaults through MCP; Streamlit settings and CLI preference commands no longer access the repository directly. The trusted Worker continues to read preferences from the repository.
+- The fallback extractor no longer invents a two-day reminder offset when the user only says “提醒我”; the saved preference now supplies that default.
+- Existing invalid time values are safely treated as defaults during reads, allowing databases created by earlier permissive settings pages to upgrade without a migration.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -107,6 +116,10 @@ python -m lifevault.cli subscriptions --days 30
 python -m lifevault.cli reminders
 python -m lifevault.cli audit --result failed
 python -m lifevault.cli audit --actor mcp --limit 20 --json
+python -m lifevault.cli preferences show
+python -m lifevault.cli preferences set --default-time 08:30 --advance-days 3 --yes
+python -m lifevault.cli preferences set --quiet-start 22:00 --quiet-end 08:00 --yes
+python -m lifevault.cli preferences set --clear-quiet-hours --yes
 python -m lifevault.cli snooze-reminder REMINDER_ID --minutes 60
 python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:00
 python -m lifevault.cli worker --once
@@ -150,8 +163,10 @@ save_record
 search_records
 list_upcoming_subscriptions
 get_record
+get_preferences
 find_duplicate
 update_record_status
+update_preferences
 create_reminder
 list_reminders
 snooze_reminder
@@ -159,7 +174,7 @@ cancel_reminder
 list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation. The CLI, Streamlit record/reminder/audit views, and Agent search use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and reminder creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference updates are host/UI operations and are not part of the model-generated tool plan.
 
 ## Streamlit
 
