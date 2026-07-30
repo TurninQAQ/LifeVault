@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.config import Settings
@@ -63,10 +66,149 @@ class GraphAgentTest(unittest.TestCase):
             self.assertEqual(turn.status, "completed")
 
             duplicate_turn = agent.start_create_record(text)
+            self.assertEqual(duplicate_turn.interrupt_type, "record_confirmation")
+            duplicate_turn = agent.resume(duplicate_turn.thread_id, {"action": "confirm"})
             self.assertEqual(duplicate_turn.status, "interrupted")
             self.assertEqual(duplicate_turn.interrupt_type, "duplicate_review")
             self.assertTrue(duplicate_turn.duplicate_candidates)
             agent.close()
+
+    def test_record_correction_recalculates_record_and_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个相机，5000 元，七天退货，"
+                "退货前 2 天提醒我。"
+            )
+            original_schedule = turn.reminders[0]["scheduled_at"]
+
+            turn = agent.resume(
+                turn.thread_id,
+                {
+                    "action": "apply",
+                    "corrections": {
+                        "amount": 5200,
+                        "return_days": 14,
+                    },
+                },
+            )
+
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertEqual(turn.field_errors, {})
+            self.assertEqual(turn.record["amount"], 5200)
+            self.assertEqual(turn.record["details"]["return_deadline"], "2099-08-08")
+            self.assertNotEqual(turn.reminders[0]["scheduled_at"], original_schedule)
+            agent.close()
+
+    def test_invalid_record_correction_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个相机，5000 元，七天退货，不提醒。"
+            )
+
+            turn = agent.resume(
+                turn.thread_id,
+                {
+                    "action": "apply",
+                    "corrections": {
+                        "amount": 5200,
+                        "return_days": 5000,
+                    },
+                },
+            )
+
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertIn("return_days", turn.field_errors)
+            self.assertEqual(turn.candidate["amount"], 5000.0)
+            self.assertEqual(turn.candidate["return_days"], 7)
+            self.assertEqual(turn.record["amount"], 5000.0)
+            agent.close()
+
+    def test_duplicate_check_uses_corrected_final_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            existing_text = (
+                "我 2099-07-25 在京东买了一个相机，5000 元，订单号 FINAL-1，"
+                "七天退货，不提醒。"
+            )
+            existing = agent.start_create_record(existing_text)
+            existing = agent.resume(existing.thread_id, {"action": "confirm"})
+            self.assertEqual(existing.status, "completed")
+
+            turn = agent.start_create_record(
+                "我 2099-07-25 在京东买了一个镜头，5000 元，订单号 OTHER-1，"
+                "七天退货，不提醒。"
+            )
+            turn = agent.resume(
+                turn.thread_id,
+                {
+                    "action": "apply",
+                    "corrections": {
+                        "title": "相机",
+                        "order_number": "FINAL-1",
+                    },
+                },
+            )
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(turn.interrupt_type, "duplicate_review")
+            self.assertTrue(turn.duplicate_candidates)
+            agent.close()
+
+    def test_relative_date_is_frozen_in_review_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_now = datetime(2026, 7, 30, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            later_now = datetime(2026, 8, 2, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            with patch("lifevault.agent.graph_agent.now_in_timezone", return_value=first_now):
+                agent = self.make_agent(tmp)
+                turn = agent.start_create_record(
+                    "我昨天买了一个键盘，899 元，七天退货，不提醒。"
+                )
+                self.assertEqual(turn.candidate["event_date"], "2026-07-29")
+                thread_id = turn.thread_id
+                agent.close()
+
+            with patch("lifevault.agent.graph_agent.now_in_timezone", return_value=later_now):
+                resumed = self.make_agent(tmp)
+                recovered = resumed.get_state(thread_id)
+                self.assertEqual(recovered.candidate["event_date"], "2026-07-29")
+                self.assertEqual(recovered.record["details"]["return_deadline"], "2026-08-05")
+                resumed.close()
+
+    def test_legacy_unconfirmed_duplicate_checkpoint_resumes_to_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            text = (
+                "我 2099-07-25 买了一个键盘，899 元，订单号 LEGACY-DUP，"
+                "七天退货，不提醒。"
+            )
+            saved = agent.start_create_record(text)
+            saved = agent.resume(saved.thread_id, {"action": "confirm"})
+            self.assertEqual(saved.status, "completed")
+
+            legacy = agent.start_create_record(text)
+            config = agent._config(legacy.thread_id)
+            agent._graph.update_state(
+                config,
+                {
+                    "record_confirmed": False,
+                    "review_action": "duplicate",
+                },
+                as_node="confirm_record",
+            )
+            agent._graph.invoke(None, config=config)
+            thread_id = legacy.thread_id
+            agent.close()
+
+            resumed = self.make_agent(tmp)
+            recovered = resumed.get_state(thread_id)
+            self.assertEqual(recovered.interrupt_type, "duplicate_review")
+            turn = resumed.resume(thread_id, {"action": "continue"})
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertIsNone(turn.saved_record_id)
+            resumed.close()
 
     def test_resume_after_new_agent_instance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -8,6 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from lifevault.agent.corrections import apply_candidate_corrections
 from lifevault.agent.service import LifeVaultAgent
 from lifevault.config import Settings
 from lifevault.hooks.privacy_hooks import sanitize_input
@@ -29,7 +31,11 @@ class LifeVaultGraphState(TypedDict, total=False):
     raw_input: str
     sanitized_input: str
     candidate: dict[str, Any]
+    extraction_warnings: list[str]
     warnings: list[str]
+    field_errors: dict[str, list[str]]
+    correction_count: int
+    review_action: Literal["review", "validate", "duplicate", "cancel"]
     missing_fields: list[str]
     duplicate_candidates: list[dict[str, Any]]
     duplicate_decision: Literal["continue", "cancel"]
@@ -122,11 +128,12 @@ class GraphAgent:
                 "end": END,
             },
         )
-        builder.add_edge("prepare_record", "review_duplicate")
+        builder.add_edge("prepare_record", "confirm_record")
         builder.add_conditional_edges(
             "review_duplicate",
             self._route_after_duplicate,
             {
+                "save": "save_record",
                 "confirm_record": "confirm_record",
                 "end": END,
             },
@@ -135,7 +142,9 @@ class GraphAgent:
             "confirm_record",
             self._route_after_record_confirmation,
             {
-                "save": "save_record",
+                "validate": "validate_record",
+                "review": "confirm_record",
+                "duplicate": "review_duplicate",
                 "end": END,
             },
         )
@@ -174,7 +183,10 @@ class GraphAgent:
         candidate, warnings = self.service.extractor.extract_record(state["sanitized_input"], now)
         return {
             "candidate": candidate.model_dump(mode="json"),
-            "warnings": [*state.get("warnings", []), *warnings],
+            "extraction_warnings": warnings,
+            "warnings": warnings,
+            "field_errors": {},
+            "correction_count": 0,
         }
 
     def _validate_record_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
@@ -209,13 +221,24 @@ class GraphAgent:
             supplement, warnings = self.service.extractor.extract_record(supplement_text, now)
             candidate = self._merge_candidate(candidate, supplement, supplement_text)
             missing = self.service._missing_fields(candidate, now)
+            extraction_warnings = [
+                *state.get("extraction_warnings", state.get("warnings", [])),
+                *warnings,
+            ]
+            if not missing:
+                candidate = self.service._canonicalize_candidate(candidate, now)
             return {
                 "candidate": candidate.model_dump(mode="json"),
                 "missing_fields": missing,
-                "warnings": [*state.get("warnings", []), *warnings],
+                "extraction_warnings": extraction_warnings,
+                "warnings": extraction_warnings,
             }
 
-        return {"missing_fields": []}
+        candidate = self.service._canonicalize_candidate(candidate, now)
+        return {
+            "candidate": candidate.model_dump(mode="json"),
+            "missing_fields": [],
+        }
 
     def _prepare_record_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
         now = now_in_timezone(self.settings.default_timezone)
@@ -228,14 +251,6 @@ class GraphAgent:
                 "errors": [*state.get("errors", []), str(exc)],
             }
         record = self.service._build_record(candidate, state["sanitized_input"], now, preference)
-        duplicate_result = self.mcp_client.find_duplicate(record.model_dump(mode="json"))
-        if not duplicate_result.get("ok"):
-            return {
-                "record": record.model_dump(mode="json"),
-                "cancelled": True,
-                "errors": [*state.get("errors", []), _mcp_error_message("find_duplicate", duplicate_result)],
-            }
-        duplicates = duplicate_result.get("duplicate_candidates", [])
         reminders, reminder_warnings = self.service._build_reminders(
             candidate,
             record,
@@ -248,13 +263,21 @@ class GraphAgent:
             else (None, None, [])
         )
         reminder_payloads = [reminder.model_dump(mode="json") for reminder in reminders]
+        base_warnings = (
+            state["extraction_warnings"]
+            if "extraction_warnings" in state
+            else state.get("warnings", [])
+        )
         return {
             "record": record.model_dump(mode="json"),
-            "duplicate_candidates": duplicates,
+            "duplicate_candidates": [],
+            "duplicate_decision": "cancel",
             "reminders": reminder_payloads,
             "reminder": reminder_payloads[0] if reminder_payloads else {},
+            "field_errors": {},
+            "record_confirmed": False,
             "warnings": [
-                *state.get("warnings", []),
+                *base_warnings,
                 *deadline_warnings,
                 *reminder_warnings,
             ],
@@ -263,9 +286,21 @@ class GraphAgent:
     def _review_duplicate_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
         if state.get("cancelled"):
             return {}
-        duplicates = state.get("duplicate_candidates", [])
+        duplicate_result = self.mcp_client.find_duplicate(state["record"])
+        if not duplicate_result.get("ok"):
+            return {
+                "cancelled": True,
+                "errors": [
+                    *state.get("errors", []),
+                    _mcp_error_message("find_duplicate", duplicate_result),
+                ],
+            }
+        duplicates = duplicate_result.get("duplicate_candidates", [])
         if not duplicates:
-            return {"duplicate_decision": "continue"}
+            return {
+                "duplicate_candidates": [],
+                "duplicate_decision": "continue",
+            }
 
         payload = interrupt(
             {
@@ -279,24 +314,59 @@ class GraphAgent:
         if action == "cancel":
             return {
                 "cancelled": True,
+                "duplicate_candidates": duplicates,
                 "duplicate_decision": "cancel",
                 "errors": [*state.get("errors", []), "User cancelled duplicate record."],
             }
-        return {"duplicate_decision": "continue"}
+        return {
+            "duplicate_candidates": duplicates,
+            "duplicate_decision": "continue",
+        }
 
     def _confirm_record_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
         payload = interrupt(
             {
                 "type": "record_confirmation",
-                "prompt": "请确认是否保存这条记录。",
+                "prompt": "请校对并确认是否保存这条记录。",
+                "candidate": state.get("candidate"),
                 "record": state.get("record"),
-                "duplicate_candidates": state.get("duplicate_candidates", []),
+                "reminders": _state_reminders(state),
+                "field_errors": state.get("field_errors", {}),
+                "warnings": state.get("warnings", []),
             }
         )
         action = _payload_action(payload)
+        if action in {"apply", "edit"}:
+            now = now_in_timezone(self.settings.default_timezone)
+            candidate = ExtractedRecordCandidate.model_validate(state["candidate"])
+            result = apply_candidate_corrections(
+                candidate,
+                payload.get("corrections") if isinstance(payload, dict) else None,
+                self.service,
+                now,
+            )
+            if result.field_errors:
+                return {
+                    "review_action": "review",
+                    "record_confirmed": False,
+                    "field_errors": result.field_errors,
+                }
+            return {
+                "candidate": result.candidate.model_dump(mode="json"),
+                "review_action": "validate",
+                "record_confirmed": False,
+                "duplicate_candidates": [],
+                "field_errors": {},
+                "correction_count": state.get("correction_count", 0) + 1,
+            }
         if action == "confirm":
-            return {"record_confirmed": True}
+            return {
+                "record_confirmed": True,
+                "review_action": "duplicate",
+                "field_errors": {},
+            }
         return {
+            "review_action": "cancel",
             "record_confirmed": False,
             "cancelled": True,
             "errors": [*state.get("errors", []), "User declined record save."],
@@ -309,11 +379,11 @@ class GraphAgent:
         record_key = stable_key(
             "record",
             self.settings.default_user_id,
-            record.source_text_hash,
-            record.record_type.value,
-            record.title,
-            record.event_date,
-            record.deadline,
+            json.dumps(
+                record.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         )
         save_result = self.mcp_client.save_record(
             record.model_dump(mode="json"),
@@ -442,12 +512,14 @@ class GraphAgent:
     def _route_after_duplicate(self, state: LifeVaultGraphState) -> str:
         if state.get("cancelled"):
             return "end"
+        if state.get("record_confirmed"):
+            return "save"
         return "confirm_record"
 
     def _route_after_record_confirmation(self, state: LifeVaultGraphState) -> str:
-        if state.get("cancelled") or not state.get("record_confirmed"):
+        if state.get("cancelled"):
             return "end"
-        return "save"
+        return state.get("review_action", "review")
 
     def _route_after_save_record(self, state: LifeVaultGraphState) -> str:
         if state.get("cancelled") or not state.get("saved_record_id"):
@@ -530,6 +602,10 @@ class GraphAgent:
             saved_record_id=state.get("saved_record_id"),
             reminder_ids=active_reminder_ids,
             reminder_id=active_reminder_ids[0] if active_reminder_ids else None,
+            field_errors=(interrupt_payload or {}).get(
+                "field_errors",
+                state.get("field_errors", {}),
+            ),
             warnings=(interrupt_payload or {}).get("warnings", state.get("warnings", [])),
             errors=state.get("errors", []),
         )

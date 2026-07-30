@@ -336,15 +336,15 @@ flowchart TD
     I1 --> VALIDATE
 
     VALIDATE -->|字段完整| CALC[calculate_deadline]
-    CALC --> DUP[detect_duplicate]
+    CALC --> PREVIEW[preview_record]
+    PREVIEW --> I3[[interrupt: 校对并确认]]
+    I3 -->|应用修改| VALIDATE
+    I3 -->|确认| DUP[detect_duplicate]
 
     DUP -->|疑似重复| REVIEW_DUP[review_duplicate]
-    REVIEW_DUP --> I2[[interrupt: 合并/继续/取消]]
-    I2 --> PREVIEW[preview_record]
-
-    DUP -->|无重复| PREVIEW
-    PREVIEW --> I3[[interrupt: 确认保存]]
-    I3 --> SAVE[save_record]
+    REVIEW_DUP --> I2[[interrupt: 继续/取消]]
+    I2 -->|继续| SAVE[save_record]
+    DUP -->|无重复| SAVE
 
     SAVE --> REMINDER_Q{是否需要提醒}
     REMINDER_Q -->|否| END2([END])
@@ -370,6 +370,8 @@ class LifeVaultState(TypedDict):
     extracted_record: dict | None
     validated_record: dict | None
     missing_fields: list[str]
+    field_errors: dict[str, list[str]]
+    correction_count: int
 
     duplicate_candidates: list[dict]
     record_confirmed: bool
@@ -386,7 +388,7 @@ class LifeVaultState(TypedDict):
 
 1. 缺少必要字段时暂停，让用户补充金额、日期或事项名称。
 2. 检测到重复记录时暂停，让用户选择合并、继续保存或取消。
-3. 保存记录前暂停，展示结构化预览和计算结果。
+3. 保存记录前暂停，允许编辑白名单字段；应用修改后重新校验、计算并检查重复项。
 4. 创建提醒前暂停，展示提醒时间、事项和通知内容。
 
 所有中断都使用同一个 `thread_id` 恢复。程序退出后再次启动，应能从 Checkpointer 中恢复未完成流程。

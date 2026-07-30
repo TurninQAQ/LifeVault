@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 
 class RecordType(str, Enum):
@@ -64,6 +73,10 @@ class ExtractedRecordCandidate(BaseModel):
     event_date_text: str | None = None
     deadline_date: date | None = None
     deadline_text: str | None = None
+    return_deadline_date: date | None = None
+    warranty_deadline_date: date | None = None
+    next_renewal_date: date | None = None
+    due_date: date | None = None
 
     merchant: str | None = None
     order_number: str | None = None
@@ -104,6 +117,126 @@ class ExtractedRecordCandidate(BaseModel):
     @classmethod
     def keep_allowed_tools(cls, value: list[str]) -> list[str]:
         return [tool for tool in value if tool in ALLOWED_TOOL_PLAN]
+
+
+class CandidateCorrections(BaseModel):
+    """User-authored candidate changes accepted only during record review."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        allow_inf_nan=False,
+    )
+
+    title: str | None = None
+    amount: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+    event_date: date | None = None
+    notes: str | None = None
+
+    merchant: str | None = None
+    order_number: str | None = None
+    return_days: StrictInt | None = Field(default=None, ge=1, le=3650)
+    warranty_months: StrictInt | None = Field(default=None, ge=1, le=1200)
+    return_deadline_date: date | None = None
+    warranty_deadline_date: date | None = None
+
+    service_name: str | None = None
+    billing_cycle: Literal["monthly", "yearly", "weekly", "unknown"] | None = None
+    next_renewal_date: date | None = None
+    auto_renew: StrictBool | None = None
+
+    bill_name: str | None = None
+    billing_period: str | None = None
+    due_date: date | None = None
+
+    reminder_requested: StrictBool | None = None
+    return_reminder_requested: StrictBool | None = None
+    warranty_reminder_requested: StrictBool | None = None
+    remind_before_days: StrictInt | None = Field(default=None, ge=0, le=365)
+    return_remind_before_days: StrictInt | None = Field(default=None, ge=0, le=365)
+    warranty_remind_before_days: StrictInt | None = Field(default=None, ge=0, le=365)
+    reminder_time: str | None = None
+
+    @field_validator(
+        "title",
+        "merchant",
+        "order_number",
+        "service_name",
+        "bill_name",
+        "notes",
+        "billing_period",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError("Control characters are not allowed.")
+        return normalized
+
+    @field_validator("title", "merchant", "service_name", "bill_name")
+    @classmethod
+    def validate_short_text(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 200:
+            raise ValueError("Must contain at most 200 characters.")
+        return value
+
+    @field_validator("order_number")
+    @classmethod
+    def validate_order_number(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 128:
+            raise ValueError("Must contain at most 128 characters.")
+        return value
+
+    @field_validator("notes", "billing_period")
+    @classmethod
+    def validate_long_text(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 1000:
+            raise ValueError("Must contain at most 1000 characters.")
+        return value
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def validate_currency(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            raise ValueError("Currency must be a three-letter code.")
+        return normalized
+
+    @field_validator("reminder_time")
+    @classmethod
+    def validate_reminder_time(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("Reminder time must use HH:MM.")
+        return value
+
+    @field_validator("title", "amount", "currency")
+    @classmethod
+    def validate_required_values(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be cleared.")
+        return value
+
+    @field_validator(
+        "auto_renew",
+        "reminder_requested",
+        "return_reminder_requested",
+        "warranty_reminder_requested",
+    )
+    @classmethod
+    def validate_boolean_values(cls, value: bool | None, info: Any) -> bool:
+        if value is None:
+            raise ValueError(f"{info.field_name} must be true or false.")
+        return value
 
 
 class LifeRecordCreate(BaseModel):
@@ -235,6 +368,7 @@ class GraphTurn(BaseModel):
     saved_record_id: str | None = None
     reminder_ids: list[str] = Field(default_factory=list)
     reminder_id: str | None = None
+    field_errors: dict[str, list[str]] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 

@@ -31,8 +31,18 @@ def main() -> None:
 
     resume = sub.add_parser("resume", help="Resume an interrupted create-record graph")
     resume.add_argument("thread_id")
-    resume.add_argument("--text", default=None, help="Natural language supplement for missing fields")
-    resume.add_argument(
+    resume_input = resume.add_mutually_exclusive_group()
+    resume_input.add_argument(
+        "--text",
+        default=None,
+        help="Natural language supplement for missing fields",
+    )
+    resume_input.add_argument(
+        "--corrections-json",
+        default=None,
+        help="JSON object with structured record-review corrections",
+    )
+    resume_input.add_argument(
         "--action",
         choices=["confirm", "continue", "cancel", "skip"],
         default=None,
@@ -149,6 +159,14 @@ def main() -> None:
         payload: dict[str, Any] | str
         if args.text is not None:
             payload = {"text": args.text}
+        elif args.corrections_json is not None:
+            try:
+                corrections = json.loads(args.corrections_json)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"Invalid --corrections-json: {exc.msg}") from exc
+            if not isinstance(corrections, dict):
+                raise SystemExit("--corrections-json must contain a JSON object")
+            payload = {"action": "apply", "corrections": corrections}
         elif args.action is not None:
             payload = {"action": args.action}
         else:
@@ -347,6 +365,11 @@ def print_graph_turn(turn: GraphTurn) -> None:
         print(f"Saved record: {turn.saved_record_id}")
     if turn.reminder_ids:
         print("Created reminders: " + ", ".join(turn.reminder_ids))
+    if turn.field_errors:
+        print("Field errors:")
+        for field, messages in turn.field_errors.items():
+            for message in messages:
+                print(f"- {field}: {message}")
     if turn.warnings:
         print("Warnings: " + "; ".join(turn.warnings))
     if turn.errors:

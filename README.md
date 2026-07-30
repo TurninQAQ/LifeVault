@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.13 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.14 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -90,11 +90,22 @@ v0.13 adds typed purchase deadlines and atomic multi-reminder workflows:
 - Completed purchases still receive warranty reminders; returned or cancelled purchases do not.
 - The fallback evaluation now contains 72 cases and passes 72/72 cases and 448/448 expected fields.
 
+v0.14 adds a typed record-review loop before save:
+
+- Streamlit replaces the read-only record JSON with record-type-specific fields and a computed record/reminder summary.
+- Applying corrections is separate from saving. The complete correction batch is validated atomically, and recoverable failures return field-specific errors without changing the last valid candidate.
+- Relative dates are frozen into typed dates at the first review so a restored checkpoint cannot reinterpret `昨天` or `月底` on a different day.
+- Applying a valid change reruns deterministic validation, deadline and reminder calculation, and the final MCP duplicate check.
+- Exact return and warranty dates override duration calculations with a visible warning. Logically impossible purchase and subscription date orderings are rejected.
+- Streamlit disables save while edits are unapplied. CLI scripts can use `resume THREAD_ID --corrections-json '{...}'`.
+- Save idempotency uses the normalized final record. v0.13 record, duplicate-review, and reminder checkpoints remain resumable.
+- Saved-record editing, record-type changes, OCR/PDF import, draft history, and post-save reminder replanning remain out of scope.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
 - `duplicate_review`: choose `continue` or `cancel`.
-- `record_confirmation`: choose `confirm` or `cancel`.
+- `record_confirmation`: apply structured `corrections`, then choose `confirm` or `cancel`.
 - `reminder_confirmation`: choose `confirm` or `skip`.
 
 ## Local Qwen
@@ -151,6 +162,7 @@ Resume an interrupted graph thread:
 ```bash
 python -m lifevault.cli state THREAD_ID
 python -m lifevault.cli resume THREAD_ID --text "金额是 3499 元，订单号是 123456"
+python -m lifevault.cli resume THREAD_ID --corrections-json '{"amount": 3599, "return_days": 14}'
 python -m lifevault.cli resume THREAD_ID --action confirm
 python -m lifevault.cli resume THREAD_ID --action skip
 ```

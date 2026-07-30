@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime
 from typing import Any
 from uuid import uuid4
@@ -109,11 +110,11 @@ class LifeVaultAgent:
         record_key = stable_key(
             "record",
             self.settings.default_user_id,
-            draft.record.source_text_hash,
-            draft.record.record_type.value,
-            draft.record.title,
-            draft.record.event_date,
-            draft.record.deadline,
+            json.dumps(
+                draft.record.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         )
         saved_record = self.repository.save_record(
             self.settings.default_user_id,
@@ -215,7 +216,7 @@ class LifeVaultAgent:
             if not renewal:
                 missing.append("next_renewal_date")
         elif candidate.record_type == RecordType.BILL:
-            due = candidate.deadline_date or parse_date_text(
+            due = candidate.due_date or candidate.deadline_date or parse_date_text(
                 candidate.due_date_text or candidate.deadline_text,
                 self.settings.default_timezone,
                 now,
@@ -277,6 +278,7 @@ class LifeVaultAgent:
                 "bill_name": candidate.bill_name or title,
                 "billing_period": candidate.billing_period,
             }
+            deadline = candidate.due_date or deadline
             if not deadline:
                 deadline = parse_date_text(
                     candidate.due_date_text or candidate.deadline_text,
@@ -426,18 +428,25 @@ class LifeVaultAgent:
         event_date: date | None,
         now: datetime,
     ) -> tuple[date | None, date | None, list[str]]:
-        return_deadline = candidate.deadline_date
+        explicit_return_deadline = candidate.return_deadline_date or candidate.deadline_date
         return_text = candidate.return_deadline_text or candidate.deadline_text
-        if return_deadline is None and return_text:
-            return_deadline = parse_date_text(return_text, self.settings.default_timezone, now)
-        if return_deadline is None and event_date and candidate.return_days is not None:
-            return_deadline = calculate_deadline(event_date, candidate.return_days)
+        if explicit_return_deadline is None and return_text:
+            explicit_return_deadline = parse_date_text(
+                return_text,
+                self.settings.default_timezone,
+                now,
+            )
+        calculated_return_deadline = None
+        if event_date and candidate.return_days is not None:
+            calculated_return_deadline = calculate_deadline(event_date, candidate.return_days)
 
-        explicit_warranty_deadline = parse_date_text(
-            candidate.warranty_deadline_text,
-            self.settings.default_timezone,
-            now,
-        )
+        explicit_warranty_deadline = candidate.warranty_deadline_date
+        if explicit_warranty_deadline is None:
+            explicit_warranty_deadline = parse_date_text(
+                candidate.warranty_deadline_text,
+                self.settings.default_timezone,
+                now,
+            )
         calculated_warranty_deadline = None
         if event_date and candidate.warranty_months is not None:
             calculated_warranty_deadline = calculate_calendar_month_deadline(
@@ -446,16 +455,81 @@ class LifeVaultAgent:
             )
         warnings: list[str] = []
         if (
+            explicit_return_deadline
+            and calculated_return_deadline
+            and explicit_return_deadline != calculated_return_deadline
+        ):
+            warnings.append(
+                "Explicit return deadline differs from the duration calculation; "
+                f"{explicit_return_deadline.isoformat()} was used instead of "
+                f"{calculated_return_deadline.isoformat()}."
+            )
+        if (
             explicit_warranty_deadline
             and calculated_warranty_deadline
             and explicit_warranty_deadline != calculated_warranty_deadline
         ):
             warnings.append(
                 "Explicit warranty deadline differs from the duration calculation; "
-                "the explicit deadline was used."
+                f"{explicit_warranty_deadline.isoformat()} was used instead of "
+                f"{calculated_warranty_deadline.isoformat()}."
             )
+        return_deadline = explicit_return_deadline or calculated_return_deadline
         warranty_deadline = explicit_warranty_deadline or calculated_warranty_deadline
         return return_deadline, warranty_deadline, warnings
+
+    def _canonicalize_candidate(
+        self,
+        candidate: ExtractedRecordCandidate,
+        now: datetime,
+    ) -> ExtractedRecordCandidate:
+        event_date = candidate.event_date or parse_date_text(
+            candidate.event_date_text,
+            self.settings.default_timezone,
+            now,
+        )
+        updates: dict[str, Any] = {"event_date": event_date}
+
+        if candidate.record_type == RecordType.PURCHASE:
+            return_deadline = candidate.return_deadline_date or candidate.deadline_date
+            if return_deadline is None:
+                return_deadline = parse_date_text(
+                    candidate.return_deadline_text or candidate.deadline_text,
+                    self.settings.default_timezone,
+                    now,
+                )
+            warranty_deadline = candidate.warranty_deadline_date
+            if warranty_deadline is None:
+                warranty_deadline = parse_date_text(
+                    candidate.warranty_deadline_text,
+                    self.settings.default_timezone,
+                    now,
+                )
+            updates.update(
+                {
+                    "return_deadline_date": return_deadline,
+                    "warranty_deadline_date": warranty_deadline,
+                }
+            )
+        elif candidate.record_type == RecordType.SUBSCRIPTION:
+            renewal, _source = self._subscription_renewal_date(candidate, now)
+            updates.update(
+                {
+                    "next_renewal_date": renewal,
+                    "auto_renew": bool(candidate.auto_renew),
+                }
+            )
+        elif candidate.record_type == RecordType.BILL:
+            updates["due_date"] = (
+                candidate.due_date
+                or candidate.deadline_date
+                or parse_date_text(
+                    candidate.due_date_text or candidate.deadline_text,
+                    self.settings.default_timezone,
+                    now,
+                )
+            )
+        return candidate.model_copy(update=updates)
 
     def _format_search_answer(self, records: list[LifeRecord]) -> str:
         if not records:
@@ -472,6 +546,8 @@ class LifeVaultAgent:
         candidate: ExtractedRecordCandidate,
         now: datetime,
     ) -> tuple[date | None, str | None]:
+        if candidate.next_renewal_date:
+            return candidate.next_renewal_date, "next_renewal_date"
         if candidate.deadline_date:
             return candidate.deadline_date, "deadline_date"
 
