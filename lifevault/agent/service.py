@@ -235,6 +235,7 @@ class LifeVaultAgent:
                 "renewal_anchor_day": self._renewal_anchor_day(deadline, cycle),
                 "next_renewal_source": renewal_source,
                 "remind_before_days": remind_before_days,
+                "reminder_time": candidate.reminder_time or preference.default_time,
             }
         elif candidate.record_type == RecordType.BILL:
             details = {

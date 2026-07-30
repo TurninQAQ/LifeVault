@@ -18,6 +18,7 @@ AUDIT_PARAM_ALLOWLIST = {
     "snooze_reminder": frozenset({"new_reminder_id", "new_scheduled_at", "error_code"}),
     "cancel_reminder": frozenset({"record_status", "error_code"}),
     "send_reminder": frozenset({"delivery", "record_status", "error_code"}),
+    "rollover_subscription": frozenset({"billing_cycle", "reminder_type", "error_code"}),
     "update_preferences": frozenset({"changed_fields", "error_code"}),
 }
 AUDIT_ENUM_VALUES = {
@@ -28,6 +29,7 @@ AUDIT_ENUM_VALUES = {
         {"return_deadline", "warranty_deadline", "renewal", "bill_due", "custom"}
     ),
     "delivery": frozenset({"desktop", "console"}),
+    "billing_cycle": frozenset({"monthly", "yearly", "weekly"}),
 }
 AUDIT_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 AUDIT_PREFERENCE_FIELDS = frozenset(

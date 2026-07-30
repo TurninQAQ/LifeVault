@@ -17,6 +17,7 @@ from lifevault.models.schemas import (
     Reminder,
     ReminderCreate,
     ReminderStatus,
+    ReminderType,
     UserPreference,
     UserPreferencePatch,
     UserPreferenceUpdateResult,
@@ -291,6 +292,176 @@ class VaultRepository:
         if not include_auto_renew:
             records = [record for record in records if record.details.get("auto_renew") is not True]
         return records[:limit]
+
+    def list_subscription_rollover_candidates(
+        self,
+        user_id: str,
+        before: date,
+        limit: int = 100,
+    ) -> list[LifeRecord]:
+        if limit <= 0:
+            raise ValueError("limit must be positive.")
+
+        with connect(self.database_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT records.*
+                FROM life_records AS records
+                WHERE records.user_id = ?
+                  AND records.type = ?
+                  AND records.status = ?
+                  AND records.deadline IS NOT NULL
+                  AND records.deadline < ?
+                  AND (
+                      SELECT reminders.status
+                      FROM reminders
+                      WHERE reminders.record_id = records.id
+                        AND reminders.reminder_type = ?
+                      ORDER BY reminders.updated_at DESC, reminders.created_at DESC
+                      LIMIT 1
+                ) IN (?, ?)
+                ORDER BY records.deadline ASC, records.created_at ASC
+                """,
+                (
+                    user_id,
+                    RecordType.SUBSCRIPTION.value,
+                    RecordStatus.ACTIVE.value,
+                    before.isoformat(),
+                    ReminderType.RENEWAL.value,
+                    ReminderStatus.SENT.value,
+                    ReminderStatus.FAILED.value,
+                ),
+            ).fetchall()
+
+        records = [self._row_to_record(row) for row in rows]
+        return [
+            record
+            for record in records
+            if record.details.get("auto_renew") is True
+            and record.details.get("billing_cycle") in {"monthly", "yearly", "weekly"}
+        ][:limit]
+
+    def rollover_subscription(
+        self,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        next_deadline: date,
+        reminder: ReminderCreate,
+        idempotency_key: str,
+    ) -> tuple[LifeRecord, Reminder] | None:
+        if reminder.record_id != record_id:
+            raise ValueError("Reminder record does not match subscription.")
+        if reminder.reminder_type != ReminderType.RENEWAL:
+            raise ValueError("Subscription rollover requires a renewal reminder.")
+
+        with connect(self.database_path) as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM life_records
+                WHERE user_id = ? AND id = ? AND version = ?
+                """,
+                (user_id, record_id, expected_version),
+            ).fetchone()
+            if not row:
+                return None
+
+            record = self._row_to_record(row)
+            billing_cycle = record.details.get("billing_cycle")
+            if (
+                record.record_type != RecordType.SUBSCRIPTION
+                or record.status != RecordStatus.ACTIVE
+                or record.details.get("auto_renew") is not True
+                or billing_cycle not in {"monthly", "yearly", "weekly"}
+                or record.deadline is None
+                or next_deadline <= record.deadline
+            ):
+                raise ValueError("Record is not eligible for subscription rollover.")
+
+            details = dict(record.details)
+            details["previous_renewal_date"] = record.deadline.isoformat()
+            details["next_renewal_source"] = "worker_rollover"
+            now = _utc_now().isoformat()
+            updated = conn.execute(
+                """
+                UPDATE life_records
+                SET deadline = ?, details_json = ?, version = version + 1, updated_at = ?
+                WHERE user_id = ? AND id = ? AND version = ?
+                """,
+                (
+                    next_deadline.isoformat(),
+                    json.dumps(details, ensure_ascii=False, sort_keys=True),
+                    now,
+                    user_id,
+                    record_id,
+                    expected_version,
+                ),
+            )
+            if updated.rowcount != 1:
+                return None
+
+            reminder_row = conn.execute(
+                """
+                SELECT * FROM reminders
+                WHERE user_id = ?
+                  AND record_id = ?
+                  AND reminder_type = ?
+                  AND (idempotency_key = ? OR scheduled_at = ?)
+                LIMIT 1
+                """,
+                (
+                    user_id,
+                    record_id,
+                    ReminderType.RENEWAL.value,
+                    idempotency_key,
+                    _dt_to_text(reminder.scheduled_at),
+                ),
+            ).fetchone()
+            if not reminder_row:
+                reminder_id = str(uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO reminders(
+                        id, record_id, user_id, scheduled_at, reminder_type, message, status,
+                        parent_id, idempotency_key, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reminder_id,
+                        record_id,
+                        user_id,
+                        _dt_to_text(reminder.scheduled_at),
+                        ReminderType.RENEWAL.value,
+                        reminder.message,
+                        ReminderStatus.PENDING.value,
+                        reminder.parent_id,
+                        idempotency_key,
+                        now,
+                        now,
+                    ),
+                )
+                reminder_row = conn.execute(
+                    "SELECT * FROM reminders WHERE id = ?",
+                    (reminder_id,),
+                ).fetchone()
+
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor="worker",
+                action="rollover_subscription",
+                target_id=record_id,
+                result="ok",
+                params={
+                    "billing_cycle": billing_cycle,
+                    "reminder_type": ReminderType.RENEWAL.value,
+                },
+            )
+            record_row = conn.execute(
+                "SELECT * FROM life_records WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+            return self._row_to_record(record_row), self._row_to_reminder(reminder_row)
 
     def find_duplicate(
         self,

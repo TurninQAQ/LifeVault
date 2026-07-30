@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from lifevault.tools.date_tools import (
@@ -47,6 +47,40 @@ class DateToolsTest(unittest.TestCase):
         last_payment = parse_date_text("2026-07-15", "Asia/Shanghai", now)
         renewal = calculate_next_renewal_date(last_payment, "monthly", today=now.date())
         self.assertEqual(renewal.isoformat(), "2026-08-15")
+
+    def test_monthly_renewal_preserves_end_of_month_anchor(self) -> None:
+        february = calculate_next_renewal_date(
+            date(2026, 1, 31),
+            "monthly",
+            today=date(2026, 2, 1),
+            renewal_anchor=31,
+        )
+        march = calculate_next_renewal_date(
+            february,
+            "monthly",
+            today=date(2026, 3, 1),
+            renewal_anchor=31,
+        )
+
+        self.assertEqual(february, date(2026, 2, 28))
+        self.assertEqual(march, date(2026, 3, 31))
+
+    def test_yearly_renewal_restores_leap_day_anchor(self) -> None:
+        non_leap_year = calculate_next_renewal_date(
+            date(2024, 2, 29),
+            "yearly",
+            today=date(2025, 1, 1),
+            renewal_anchor="02-29",
+        )
+        leap_year = calculate_next_renewal_date(
+            date(2027, 2, 28),
+            "yearly",
+            today=date(2028, 1, 1),
+            renewal_anchor="02-29",
+        )
+
+        self.assertEqual(non_leap_year, date(2025, 2, 28))
+        self.assertEqual(leap_year, date(2028, 2, 29))
 
 
 if __name__ == "__main__":

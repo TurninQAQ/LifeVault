@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,6 +53,111 @@ class ReminderWorkerTest(unittest.TestCase):
             reminder = repo.get_reminder(settings.default_user_id, reminder_id)
             self.assertEqual(reminder.status, ReminderStatus.SENT)
             self.assertEqual(len(desktop.calls), 1)
+
+    def test_expired_auto_renew_subscription_rolls_over_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            now = datetime(2026, 7, 30, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            record, reminder = create_subscription_reminder(
+                repo,
+                deadline=date(2026, 7, 29),
+                auto_renew=True,
+                scheduled_at=datetime(2026, 7, 27, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+            desktop = RecordingProvider()
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=desktop,
+                console_provider=RecordingProvider(),
+            )
+
+            self.assertEqual(worker.run_once(now), 1)
+            self.assertEqual(worker.run_once(now + timedelta(minutes=1)), 0)
+
+            updated = repo.get_record(settings.default_user_id, record.id)
+            reminders = repo.list_reminders(settings.default_user_id)
+            self.assertEqual(updated.deadline, date(2026, 8, 29))
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(updated.details["previous_renewal_date"], "2026-07-29")
+            self.assertEqual(len(reminders), 2)
+            self.assertEqual(repo.get_reminder(settings.default_user_id, reminder.id).status, ReminderStatus.SENT)
+            next_reminder = next(item for item in reminders if item.id != reminder.id)
+            self.assertEqual(next_reminder.status, ReminderStatus.PENDING)
+            self.assertEqual(next_reminder.reminder_type, ReminderType.RENEWAL)
+            self.assertEqual(next_reminder.scheduled_at.isoformat(), "2026-08-27T08:30:00+08:00")
+            self.assertEqual(len(desktop.calls), 1)
+            audit = repo.list_audit_logs(settings.default_user_id, action="rollover_subscription")
+            self.assertEqual([(log.target_id, log.result) for log in audit], [(record.id, "ok")])
+            self.assertIn('"billing_cycle": "monthly"', audit[0].params_summary or "")
+
+    def test_manual_subscription_and_cancelled_reminder_do_not_roll_over(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            now = datetime(2026, 7, 30, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            manual, _manual_reminder = create_subscription_reminder(
+                repo,
+                deadline=date(2026, 7, 29),
+                auto_renew=False,
+                scheduled_at=datetime(2026, 7, 27, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                key_suffix="manual",
+            )
+            cancelled, cancelled_reminder = create_subscription_reminder(
+                repo,
+                deadline=date(2026, 7, 28),
+                auto_renew=True,
+                scheduled_at=datetime(2026, 7, 26, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                key_suffix="cancelled",
+            )
+            repo.cancel_reminder(
+                settings.default_user_id,
+                cancelled_reminder.id,
+                user_confirmed=True,
+            )
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=RecordingProvider(),
+                console_provider=RecordingProvider(),
+            )
+
+            self.assertEqual(worker.run_once(now), 1)
+
+            self.assertEqual(repo.get_record(settings.default_user_id, manual.id).deadline, date(2026, 7, 29))
+            self.assertEqual(repo.get_record(settings.default_user_id, cancelled.id).deadline, date(2026, 7, 28))
+            self.assertEqual(len(repo.list_reminders(settings.default_user_id)), 2)
+            self.assertEqual(
+                repo.list_audit_logs(settings.default_user_id, action="rollover_subscription"),
+                [],
+            )
+
+    def test_rollover_after_long_pause_schedules_only_a_future_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            record, reminder = create_subscription_reminder(
+                repo,
+                deadline=date(2026, 1, 31),
+                auto_renew=True,
+                scheduled_at=datetime(2026, 1, 29, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                key_suffix="long-pause",
+            )
+            repo.mark_reminder_sent(settings.default_user_id, reminder.id)
+            now = datetime(2026, 5, 30, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=RecordingProvider(),
+                console_provider=RecordingProvider(),
+            )
+
+            self.assertEqual(worker.run_once(now), 0)
+
+            updated = repo.get_record(settings.default_user_id, record.id)
+            reminders = repo.list_reminders(settings.default_user_id)
+            next_reminder = next(item for item in reminders if item.id != reminder.id)
+            self.assertEqual(updated.deadline, date(2026, 6, 30))
+            self.assertEqual(next_reminder.scheduled_at.isoformat(), "2026-06-28T09:00:00+08:00")
+            self.assertGreater(next_reminder.scheduled_at, now)
 
     def test_inactive_record_cancels_reminder_before_send(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,6 +332,43 @@ def create_due_reminder(repo: VaultRepository, now: datetime) -> tuple[str, str]
         f"reminder-{now.isoformat()}",
     )
     return record.id, reminder.id
+
+
+def create_subscription_reminder(
+    repo: VaultRepository,
+    deadline: date,
+    auto_renew: bool,
+    scheduled_at: datetime,
+    key_suffix: str = "auto",
+):
+    record = repo.save_record(
+        "local",
+        LifeRecordCreate(
+            record_type=RecordType.SUBSCRIPTION,
+            title=f"测试会员-{key_suffix}",
+            amount=30,
+            deadline=deadline,
+            details={
+                "billing_cycle": "monthly",
+                "auto_renew": auto_renew,
+                "renewal_anchor_day": deadline.day,
+                "remind_before_days": 2,
+                "reminder_time": scheduled_at.strftime("%H:%M"),
+            },
+        ),
+        f"subscription-record-{key_suffix}",
+    )
+    reminder = repo.create_reminder(
+        "local",
+        ReminderCreate(
+            record_id=record.id,
+            scheduled_at=scheduled_at,
+            reminder_type=ReminderType.RENEWAL,
+            message="测试续费提醒",
+        ),
+        f"subscription-reminder-{key_suffix}",
+    )
+    return record, reminder
 
 
 if __name__ == "__main__":

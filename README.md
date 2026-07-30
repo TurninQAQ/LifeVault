@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.11 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.12 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -71,6 +71,14 @@ v0.11 closes the user-preference Memory boundary:
 - Agent reminder planning reads defaults through MCP; Streamlit settings and CLI preference commands no longer access the repository directly. The trusted Worker continues to read preferences from the repository.
 - The fallback extractor no longer invents a two-day reminder offset when the user only says “提醒我”; the saved preference now supplies that default.
 - Existing invalid time values are safely treated as defaults during reads, allowing databases created by earlier permissive settings pages to upgrade without a migration.
+
+v0.12 turns subscription renewal reminders into a recurring loop:
+
+- After an active auto-renewing subscription passes its current renewal date, the Worker advances its `deadline` and creates the next renewal reminder.
+- The record update, reminder creation, and privacy-filtered audit event share one SQLite transaction with optimistic version checks and a stable idempotency key.
+- Monthly and yearly rollovers preserve the original renewal anchor, including month-end dates such as the 31st and leap-day annual renewals.
+- A long Worker pause fast-forwards to the next reminder that is still in the future instead of emitting several obsolete cycles.
+- Manual renewals, cancelled subscriptions, cancelled renewal reminders, and subscriptions whose reminder was skipped are not rolled forward automatically.
 
 Create-record interrupts:
 

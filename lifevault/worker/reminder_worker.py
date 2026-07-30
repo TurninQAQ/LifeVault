@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from lifevault.config import Settings
-from lifevault.models.schemas import RecordStatus
+from lifevault.models.schemas import RecordStatus, ReminderCreate, ReminderType
 from lifevault.storage.repository import VaultRepository
-from lifevault.tools.notification_tools import ConsoleNotificationProvider, DesktopNotificationProvider
+from lifevault.tools.date_tools import calculate_next_renewal_date, calculate_reminder_at
 from lifevault.tools.idempotency import stable_key
+from lifevault.tools.notification_tools import ConsoleNotificationProvider, DesktopNotificationProvider
 
 
 class NotificationProvider(Protocol):
@@ -31,7 +32,7 @@ class ReminderWorker:
         self.console_provider = console_provider or ConsoleNotificationProvider()
 
     def run_once(self, now: datetime | None = None) -> int:
-        current = now or datetime.now(ZoneInfo(self.settings.default_timezone))
+        current = _normalize_now(now, self.settings.default_timezone)
         reminders = self.repository.claim_due_reminders(
             self.settings.default_user_id,
             current,
@@ -88,7 +89,82 @@ class ReminderWorker:
             else:
                 self.repository.mark_reminder_sent(self.settings.default_user_id, reminder.id)
             processed += 1
+        self._rollover_expired_subscriptions(current)
         return processed
+
+    def _rollover_expired_subscriptions(self, current: datetime) -> None:
+        preference = self.repository.get_preferences(self.settings.default_user_id)
+        records = self.repository.list_subscription_rollover_candidates(
+            self.settings.default_user_id,
+            before=current.date(),
+        )
+        for record in records:
+            billing_cycle = str(record.details["billing_cycle"])
+            renewal_anchor = record.details.get("renewal_anchor_day")
+            before_days = record.details.get("remind_before_days")
+            if isinstance(before_days, bool) or not isinstance(before_days, int) or not 0 <= before_days <= 30:
+                before_days = preference.default_advance_days
+            reminder_time = record.details.get("reminder_time")
+            if not isinstance(reminder_time, str):
+                reminder_time = preference.default_time
+
+            next_deadline = calculate_next_renewal_date(
+                record.deadline,
+                billing_cycle,
+                today=current.date() + timedelta(days=1),
+                renewal_anchor=renewal_anchor,
+            )
+            if next_deadline is None:
+                continue
+
+            scheduled_at = _calculate_rollover_reminder_at(
+                next_deadline,
+                before_days,
+                reminder_time,
+                self.settings.default_timezone,
+                preference.default_time,
+            )
+            while scheduled_at <= current:
+                following_deadline = calculate_next_renewal_date(
+                    next_deadline,
+                    billing_cycle,
+                    today=next_deadline + timedelta(days=1),
+                    renewal_anchor=renewal_anchor,
+                )
+                if following_deadline is None:
+                    break
+                next_deadline = following_deadline
+                scheduled_at = _calculate_rollover_reminder_at(
+                    next_deadline,
+                    before_days,
+                    reminder_time,
+                    self.settings.default_timezone,
+                    preference.default_time,
+                )
+            if scheduled_at <= current:
+                continue
+
+            reminder = ReminderCreate(
+                record_id=record.id,
+                scheduled_at=scheduled_at,
+                reminder_type=ReminderType.RENEWAL,
+                message=f"你的「{record.title}」预计还有 {before_days} 天续费。",
+            )
+            idempotency_key = stable_key(
+                "subscription-rollover",
+                self.settings.default_user_id,
+                record.id,
+                next_deadline.isoformat(),
+                scheduled_at.isoformat(),
+            )
+            self.repository.rollover_subscription(
+                self.settings.default_user_id,
+                record.id,
+                record.version,
+                next_deadline,
+                reminder,
+                idempotency_key,
+            )
 
     def run_forever(self, interval_seconds: int = 60) -> None:
         while True:
@@ -131,3 +207,35 @@ def _parse_clock_time(value: str | None) -> dt_time | None:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     return dt_time(hour=hour, minute=minute)
+
+
+def _normalize_now(value: datetime | None, timezone_name: str) -> datetime:
+    timezone = ZoneInfo(timezone_name)
+    if value is None:
+        return datetime.now(timezone)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone)
+    return value.astimezone(timezone)
+
+
+def _calculate_rollover_reminder_at(
+    deadline: date,
+    before_days: int,
+    reminder_time: str,
+    timezone_name: str,
+    fallback_time: str,
+) -> datetime:
+    try:
+        return calculate_reminder_at(
+            deadline,
+            before_days,
+            reminder_time,
+            timezone_name,
+        )
+    except ValueError:
+        return calculate_reminder_at(
+            deadline,
+            before_days,
+            fallback_time,
+            timezone_name,
+        )

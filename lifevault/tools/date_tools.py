@@ -146,14 +146,15 @@ def calculate_next_renewal_date(
     anchor_date: date,
     billing_cycle: str | None,
     today: date | None = None,
+    renewal_anchor: int | str | None = None,
 ) -> date | None:
     cycle = normalize_billing_cycle(billing_cycle)
     if cycle is None:
         return None
     minimum = today or date.today()
-    candidate = _advance_cycle(anchor_date, cycle)
+    candidate = _advance_cycle(anchor_date, cycle, renewal_anchor)
     while candidate < minimum:
-        candidate = _advance_cycle(candidate, cycle)
+        candidate = _advance_cycle(candidate, cycle, renewal_anchor)
     return candidate
 
 
@@ -323,22 +324,41 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
         return None
 
 
-def _advance_cycle(value: date, cycle: str) -> date:
+def _advance_cycle(value: date, cycle: str, renewal_anchor: int | str | None = None) -> date:
     if cycle == "weekly":
         return value + timedelta(days=7)
     if cycle == "monthly":
-        return _add_months(value, 1)
+        day = renewal_anchor if isinstance(renewal_anchor, int) and 1 <= renewal_anchor <= 31 else value.day
+        return _add_months(value, 1, day=day)
     if cycle == "yearly":
-        return _add_months(value, 12)
+        month, day = _parse_yearly_renewal_anchor(renewal_anchor, value)
+        return _add_months(value, 12, month=month, day=day)
     raise ValueError(f"Unsupported billing cycle: {cycle}")
 
 
-def _add_months(value: date, months: int) -> date:
+def _add_months(
+    value: date,
+    months: int,
+    *,
+    month: int | None = None,
+    day: int | None = None,
+) -> date:
     month_index = value.month - 1 + months
     year = value.year + month_index // 12
-    month = month_index % 12 + 1
-    day = min(value.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
+    target_month = month or month_index % 12 + 1
+    target_day = min(day or value.day, calendar.monthrange(year, target_month)[1])
+    return date(year, target_month, target_day)
+
+
+def _parse_yearly_renewal_anchor(renewal_anchor: int | str | None, fallback: date) -> tuple[int, int]:
+    if isinstance(renewal_anchor, str):
+        match = re.fullmatch(r"(0?[1-9]|1[0-2])-(0?[1-9]|[12]\d|3[01])", renewal_anchor)
+        if match:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            if day <= calendar.monthrange(2000, month)[1]:
+                return month, day
+    return fallback.month, fallback.day
 
 
 def _parse_time(raw: str) -> tuple[int, int]:
