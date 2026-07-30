@@ -35,6 +35,8 @@ class ReminderWorkerTest(unittest.TestCase):
             self.assertEqual(processed, 1)
             self.assertEqual(reminder.status, ReminderStatus.SENT)
             self.assertEqual(desktop.calls, [("LifeVault 到期提醒", "测试提醒", record_id)])
+            audit = repo.list_audit_logs(settings.default_user_id, action="send_reminder")
+            self.assertEqual([(log.target_id, log.result) for log in audit], [(reminder_id, "ok")])
 
     def test_repeated_run_does_not_send_again(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,6 +68,10 @@ class ReminderWorkerTest(unittest.TestCase):
             self.assertEqual(processed, 1)
             self.assertEqual(reminder.status, ReminderStatus.CANCELLED)
             self.assertEqual(desktop.calls, [])
+            audit = repo.list_audit_logs(settings.default_user_id, action="cancel_reminder")
+            self.assertEqual(audit[0].actor, "worker")
+            self.assertEqual(audit[0].target_id, reminder_id)
+            self.assertIn('"record_status": "completed"', audit[0].params_summary or "")
 
     def test_desktop_failure_falls_back_to_console_and_marks_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,6 +89,28 @@ class ReminderWorkerTest(unittest.TestCase):
             self.assertEqual(reminder.status, ReminderStatus.FAILED)
             self.assertEqual(desktop.calls, [("LifeVault 到期提醒", "测试提醒", record_id)])
             self.assertEqual(console.calls, [("LifeVault 到期提醒", "测试提醒", record_id)])
+            audit = repo.list_audit_logs(settings.default_user_id, action="send_reminder")
+            self.assertEqual(audit[0].result, "failed")
+            self.assertIn("desktop_notification_failed", audit[0].params_summary or "")
+
+    def test_both_notification_providers_failing_still_marks_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            now = aware_now()
+            _record_id, reminder_id = create_due_reminder(repo, now)
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=RecordingProvider(should_fail=True),
+                console_provider=RecordingProvider(should_fail=True),
+            )
+
+            self.assertEqual(worker.run_once(now), 1)
+
+            reminder = repo.get_reminder(settings.default_user_id, reminder_id)
+            self.assertEqual(reminder.status, ReminderStatus.FAILED)
+            audit = repo.list_audit_logs(settings.default_user_id, action="send_reminder")
+            self.assertEqual(audit[0].result, "failed")
 
     def test_quiet_hours_snoozes_to_quiet_end(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

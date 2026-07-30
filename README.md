@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.9 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.10 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -54,6 +54,15 @@ v0.9 improves the deterministic fallback extractor against that baseline:
 - Purchase merchant/title extraction handles platform names with spaces and common quantifiers.
 - Current fallback result on the included 60 cases: intent accuracy 100.0%, record type accuracy 100.0%, field accuracy 100.0%, full-case accuracy 100.0%.
 
+v0.10 makes state-changing tool calls and reminder delivery auditable:
+
+- Successful record/reminder mutations write their audit event in the same SQLite transaction, without duplicate MCP-side success logs.
+- MCP validation rejections and write failures are recorded with stable error codes; Worker send success, failure, and automatic cancellation are also recorded.
+- Audit summaries use action-specific field and value allowlists. Raw input, titles, notes, reminder messages, search terms, idempotency keys, and exception details are excluded.
+- MCP `list_audit_logs` provides actor/action/result filters and `before_id` cursor pagination for the configured local user.
+- CLI `audit` and the Streamlit audit tab read through MCP instead of accessing SQLite directly.
+- Audit records are append-only in v0.10; editing, deletion, export, cleanup, and retention policies are intentionally out of scope.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -96,6 +105,8 @@ python -m lifevault.cli add "我订阅了腾讯视频会员，每月 30 元，�
 python -m lifevault.cli list
 python -m lifevault.cli subscriptions --days 30
 python -m lifevault.cli reminders
+python -m lifevault.cli audit --result failed
+python -m lifevault.cli audit --actor mcp --limit 20 --json
 python -m lifevault.cli snooze-reminder REMINDER_ID --minutes 60
 python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:00
 python -m lifevault.cli worker --once
@@ -145,9 +156,10 @@ create_reminder
 list_reminders
 snooze_reminder
 cancel_reminder
+list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed to the model or client. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation. The CLI, Streamlit record/reminder views, and Agent search use the same MCP client for record and reminder data access; the stdio MCP server remains available for external clients and integration smoke tests.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, and `cancel_reminder` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for duplicate detection, record saves, and reminder creation. The CLI, Streamlit record/reminder/audit views, and Agent search use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 
@@ -155,7 +167,7 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 python3 -m streamlit run lifevault/app/main.py
 ```
 
-Open the URL printed by Streamlit. The app has four tabs: add record, records, reminders, and settings.
+Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings.
 
 ## Tests
 

@@ -140,6 +140,17 @@ class Reminder(ReminderCreate):
     sent_at: datetime | None = None
 
 
+class AuditLog(BaseModel):
+    id: int
+    user_id: str
+    actor: str
+    action: str
+    target_id: str | None = None
+    result: str
+    params_summary: str | None = None
+    created_at: datetime
+
+
 class DuplicateCandidate(BaseModel):
     record_id: str
     title: str

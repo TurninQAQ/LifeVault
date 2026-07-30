@@ -28,7 +28,9 @@ def main() -> None:
     settings = get_settings()
 
     st.title("LifeVault")
-    tab_add, tab_records, tab_reminders, tab_settings = st.tabs(["添加记录", "我的记录", "提醒中心", "设置"])
+    tab_add, tab_records, tab_reminders, tab_audit, tab_settings = st.tabs(
+        ["添加记录", "我的记录", "提醒中心", "审计", "设置"]
+    )
 
     with tab_add:
         render_add_record(agent)
@@ -38,6 +40,9 @@ def main() -> None:
 
     with tab_reminders:
         render_reminders(mcp_client, settings.default_timezone)
+
+    with tab_audit:
+        render_audit(mcp_client)
 
     with tab_settings:
         render_settings(repository, settings.default_user_id)
@@ -213,6 +218,60 @@ def render_reminders(mcp_client: PersonalVaultMcpClient, timezone_name: str) -> 
                         snooze_result = mcp_client.snooze_reminder(reminder["id"], scheduled_at.isoformat())
                         if render_mcp_error("snooze_reminder", snooze_result):
                             st.rerun()
+
+
+def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
+    filters = st.columns([1, 1.4, 1, 0.8])
+    actor_value = filters[0].selectbox(
+        "执行者",
+        options=["all", "mcp", "agent", "user", "worker"],
+        key="audit_actor",
+    )
+    action_value = filters[1].selectbox(
+        "操作",
+        options=[
+            "all",
+            "save_record",
+            "update_record_status",
+            "create_reminder",
+            "snooze_reminder",
+            "cancel_reminder",
+            "send_reminder",
+        ],
+        key="audit_action",
+    )
+    result_value = filters[2].selectbox(
+        "结果",
+        options=["all", "ok", "rejected", "failed"],
+        key="audit_result",
+    )
+    limit = filters[3].number_input("条数", min_value=1, max_value=200, value=50)
+    result = mcp_client.list_audit_logs(
+        actor=None if actor_value == "all" else actor_value,
+        action=None if action_value == "all" else action_value,
+        result=None if result_value == "all" else result_value,
+        limit=int(limit),
+    )
+    if not render_mcp_error("list_audit_logs", result):
+        return
+    audit_logs = result.get("audit_logs", [])
+    if not audit_logs:
+        st.info("暂无审计记录")
+        return
+
+    rows = [
+        {
+            "ID": log["id"],
+            "时间": log["created_at"],
+            "执行者": log["actor"],
+            "操作": log["action"],
+            "结果": log["result"],
+            "目标": log.get("target_id") or "",
+            "参数摘要": log.get("params_summary") or "",
+        }
+        for log in audit_logs
+    ]
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def render_settings(repository: VaultRepository, user_id: str) -> None:

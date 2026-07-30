@@ -41,14 +41,14 @@ class ReminderWorker:
         for reminder in reminders:
             record = self.repository.get_record(self.settings.default_user_id, reminder.record_id)
             if record is None:
-                self.repository.mark_reminder_failed(self.settings.default_user_id, reminder.id, "record not found")
+                self.repository.mark_reminder_failed(self.settings.default_user_id, reminder.id, "record_not_found")
                 processed += 1
                 continue
             if record.status != RecordStatus.ACTIVE:
                 self.repository.mark_reminder_cancelled_by_worker(
                     self.settings.default_user_id,
                     reminder.id,
-                    f"record status is {record.status.value}",
+                    record.status.value,
                 )
                 processed += 1
                 continue
@@ -75,9 +75,16 @@ class ReminderWorker:
             title = "LifeVault 到期提醒"
             try:
                 self.desktop_provider.send(title, reminder.message, record_id=record.id)
-            except Exception as exc:
-                self.console_provider.send(title, reminder.message, record_id=record.id)
-                self.repository.mark_reminder_failed(self.settings.default_user_id, reminder.id, str(exc))
+            except Exception:
+                try:
+                    self.console_provider.send(title, reminder.message, record_id=record.id)
+                except Exception:
+                    pass
+                self.repository.mark_reminder_failed(
+                    self.settings.default_user_id,
+                    reminder.id,
+                    "desktop_notification_failed",
+                )
             else:
                 self.repository.mark_reminder_sent(self.settings.default_user_id, reminder.id)
             processed += 1

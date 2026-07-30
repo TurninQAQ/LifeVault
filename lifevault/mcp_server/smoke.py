@@ -173,6 +173,9 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     {"record_id": record_id, "new_status": "completed", "expected_version": 1},
                 )
                 require_ok("update_record_status", update_status_result)
+                audit_result = await call_json(session, "list_audit_logs", {"limit": 100})
+                require_ok("list_audit_logs", audit_result)
+                audit_logs = audit_result["audit_logs"]
 
                 return {
                     "ok": True,
@@ -192,6 +195,8 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "rejected_cancel": rejected_cancel,
                     "accepted_cancel": accepted_cancel,
                     "updated_record_status": update_status_result["record"]["status"],
+                    "audit_count": len(audit_logs),
+                    "audit_rejected_count": sum(log["result"] == "rejected" for log in audit_logs),
                 }
     finally:
         if tempdir is not None:

@@ -62,6 +62,16 @@ class PersonalVaultMcpClient(Protocol):
     def list_reminders(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
         ...
 
+    def list_audit_logs(
+        self,
+        actor: str | None = None,
+        action: str | None = None,
+        result: str | None = None,
+        before_id: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        ...
+
     def snooze_reminder(self, reminder_id: str, new_scheduled_at: str) -> dict[str, Any]:
         ...
 
@@ -164,6 +174,25 @@ class InProcessPersonalVaultMcpClient:
 
     def list_reminders(self, status: str | None = None, limit: int = 100) -> dict[str, Any]:
         return self.call_tool("list_reminders", {"status": status, "limit": limit})
+
+    def list_audit_logs(
+        self,
+        actor: str | None = None,
+        action: str | None = None,
+        result: str | None = None,
+        before_id: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "list_audit_logs",
+            {
+                "actor": actor,
+                "action": action,
+                "result": result,
+                "before_id": before_id,
+                "limit": limit,
+            },
+        )
 
     def snooze_reminder(self, reminder_id: str, new_scheduled_at: str) -> dict[str, Any]:
         return self.call_tool(

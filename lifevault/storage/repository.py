@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from lifevault.hooks.privacy_hooks import sanitize_audit_params, sanitize_audit_target_id
 from lifevault.models.schemas import (
+    AuditLog,
     DuplicateCandidate,
     LifeRecord,
     LifeRecordCreate,
@@ -152,10 +154,7 @@ class VaultRepository:
                 action="save_record",
                 target_id=record_id,
                 result="ok",
-                params_summary=json.dumps(
-                    {"type": record.record_type.value, "title": record.title},
-                    ensure_ascii=False,
-                ),
+                params={"record_type": record.record_type.value},
             )
             row = conn.execute("SELECT * FROM life_records WHERE id = ?", (record_id,)).fetchone()
             return self._row_to_record(row)
@@ -328,7 +327,7 @@ class VaultRepository:
                 action="update_record_status",
                 target_id=record_id,
                 result="ok",
-                params_summary=json.dumps({"new_status": new_status.value}),
+                params={"new_status": new_status.value},
             )
             row = conn.execute("SELECT * FROM life_records WHERE id = ?", (record_id,)).fetchone()
             return self._row_to_record(row)
@@ -392,10 +391,10 @@ class VaultRepository:
                 action="create_reminder",
                 target_id=reminder_id,
                 result="ok",
-                params_summary=json.dumps(
-                    {"record_id": reminder.record_id, "scheduled_at": _dt_to_text(reminder.scheduled_at)},
-                    ensure_ascii=False,
-                ),
+                params={
+                    "reminder_type": reminder.reminder_type.value,
+                    "scheduled_at": _dt_to_text(reminder.scheduled_at),
+                },
             )
             row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
             return self._row_to_reminder(row)
@@ -505,9 +504,10 @@ class VaultRepository:
                 action="snooze_reminder",
                 target_id=reminder_id,
                 result="ok",
-                params_summary=json.dumps(
-                    {"new_reminder_id": new_id, "new_scheduled_at": _dt_to_text(new_scheduled_at)}
-                ),
+                params={
+                    "new_reminder_id": new_id,
+                    "new_scheduled_at": _dt_to_text(new_scheduled_at),
+                },
             )
             row = conn.execute("SELECT * FROM reminders WHERE id = ?", (new_id,)).fetchone()
             return self._row_to_reminder(row)
@@ -554,8 +554,17 @@ class VaultRepository:
                 """,
                 (ReminderStatus.SENT.value, now, now, user_id, reminder_id),
             )
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor="worker",
+                action="send_reminder",
+                target_id=reminder_id,
+                result="ok",
+                params={"delivery": "desktop"},
+            )
 
-    def mark_reminder_failed(self, user_id: str, reminder_id: str, reason: str) -> None:
+    def mark_reminder_failed(self, user_id: str, reminder_id: str, error_code: str) -> None:
         with connect(self.database_path) as conn:
             now = _utc_now().isoformat()
             conn.execute(
@@ -573,10 +582,15 @@ class VaultRepository:
                 action="send_reminder",
                 target_id=reminder_id,
                 result="failed",
-                params_summary=reason[:500],
+                params={"error_code": error_code},
             )
 
-    def mark_reminder_cancelled_by_worker(self, user_id: str, reminder_id: str, reason: str) -> None:
+    def mark_reminder_cancelled_by_worker(
+        self,
+        user_id: str,
+        reminder_id: str,
+        record_status: str,
+    ) -> None:
         with connect(self.database_path) as conn:
             now = _utc_now().isoformat()
             conn.execute(
@@ -594,10 +608,16 @@ class VaultRepository:
                 action="cancel_reminder",
                 target_id=reminder_id,
                 result="ok",
-                params_summary=reason[:500],
+                params={"record_status": record_status},
             )
 
-    def cancel_reminder(self, user_id: str, reminder_id: str, user_confirmed: bool) -> Reminder:
+    def cancel_reminder(
+        self,
+        user_id: str,
+        reminder_id: str,
+        user_confirmed: bool,
+        actor: str = "user",
+    ) -> Reminder:
         if not user_confirmed:
             raise PermissionError("Reminder cancellation requires user confirmation.")
         with connect(self.database_path) as conn:
@@ -622,13 +642,65 @@ class VaultRepository:
             self._audit_conn(
                 conn,
                 user_id=user_id,
-                actor="user",
+                actor=actor,
                 action="cancel_reminder",
                 target_id=reminder_id,
                 result="ok",
             )
             row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
             return self._row_to_reminder(row)
+
+    def record_audit_event(
+        self,
+        user_id: str,
+        actor: str,
+        action: str,
+        target_id: str | None,
+        result: str,
+        params: dict[str, Any] | None = None,
+    ) -> AuditLog:
+        with connect(self.database_path) as conn:
+            cursor = self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action=action,
+                target_id=target_id,
+                result=result,
+                params=params,
+            )
+            row = conn.execute("SELECT * FROM audit_logs WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            return self._row_to_audit_log(row)
+
+    def list_audit_logs(
+        self,
+        user_id: str,
+        actor: str | None = None,
+        action: str | None = None,
+        result: str | None = None,
+        before_id: int | None = None,
+        limit: int = 100,
+    ) -> list[AuditLog]:
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200.")
+        if before_id is not None and before_id <= 0:
+            raise ValueError("before_id must be positive.")
+
+        sql = "SELECT * FROM audit_logs WHERE user_id = ?"
+        params: list[Any] = [user_id]
+        for column, value in (("actor", actor), ("action", action), ("result", result)):
+            if value:
+                sql += f" AND {column} = ?"
+                params.append(value)
+        if before_id is not None:
+            sql += " AND id < ?"
+            params.append(before_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        with connect(self.database_path) as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_audit_log(row) for row in rows]
 
     def save_checkpoint(self, thread_id: str, checkpoint_data: dict[str, Any]) -> None:
         with connect(self.database_path) as conn:
@@ -663,14 +735,34 @@ class VaultRepository:
         action: str,
         target_id: str | None,
         result: str,
-        params_summary: str | None = None,
-    ) -> None:
-        conn.execute(
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return conn.execute(
             """
             INSERT INTO audit_logs(user_id, actor, action, target_id, result, params_summary, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, actor, action, target_id, result, params_summary, _utc_now().isoformat()),
+            (
+                user_id,
+                actor,
+                action,
+                sanitize_audit_target_id(target_id),
+                result,
+                sanitize_audit_params(action, params),
+                _utc_now().isoformat(),
+            ),
+        )
+
+    def _row_to_audit_log(self, row: Any) -> AuditLog:
+        return AuditLog(
+            id=row["id"],
+            user_id=row["user_id"],
+            actor=row["actor"],
+            action=row["action"],
+            target_id=sanitize_audit_target_id(row["target_id"]),
+            result=row["result"],
+            params_summary=sanitize_audit_params(row["action"], row["params_summary"]),
+            created_at=_parse_datetime(row["created_at"]),
         )
 
     def _row_to_record(self, row: Any) -> LifeRecord:

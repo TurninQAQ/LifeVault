@@ -36,6 +36,22 @@ def create_server(
         ),
     )
 
+    def audit_mcp_failure(
+        action: str,
+        result: str,
+        error_code: str,
+        target_id: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        repo.record_audit_event(
+            user_id=user_id,
+            actor="mcp",
+            action=action,
+            target_id=target_id,
+            result=result,
+            params={**(params or {}), "error_code": error_code},
+        )
+
     @mcp.tool(description="Save a life record after user confirmation.")
     def save_record(
         record: dict[str, Any],
@@ -43,16 +59,30 @@ def create_server(
         user_confirmed: bool,
         source_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        raw_record_type = record.get("record_type")
+        record_type = raw_record_type if raw_record_type in {item.value for item in RecordType} else None
+        audit_params = {"record_type": record_type}
+        if not user_confirmed:
+            audit_mcp_failure("save_record", "rejected", "confirmation_required", params=audit_params)
+            return _fail("confirmation_required", "Saving a record requires user_confirmed=true.")
+        if not idempotency_key:
+            audit_mcp_failure("save_record", "rejected", "missing_idempotency_key", params=audit_params)
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
         try:
-            if not user_confirmed:
-                return _fail("confirmation_required", "Saving a record requires user_confirmed=true.")
-            if not idempotency_key:
-                return _fail("missing_idempotency_key", "idempotency_key is required.")
             parsed = LifeRecordCreate.model_validate(record)
+        except ValidationError as exc:
+            audit_mcp_failure("save_record", "rejected", "invalid_record", params=audit_params)
+            return _fail("save_record_failed", str(exc))
+        audit_params = {"record_type": parsed.record_type.value}
+        try:
             saved = repo.save_record(user_id, parsed, idempotency_key=idempotency_key, actor="mcp")
             return _ok(record=_model(saved), source_ids=source_ids or [])
-        except (ValidationError, ValueError, PermissionError) as exc:
+        except (ValueError, PermissionError) as exc:
+            audit_mcp_failure("save_record", "failed", "save_record_failed", params=audit_params)
             return _fail("save_record_failed", str(exc))
+        except Exception:
+            audit_mcp_failure("save_record", "failed", "internal_error", params=audit_params)
+            return _fail("save_record_failed", "Tool execution failed.")
 
     @mcp.tool(description="Search real saved records from the local vault.")
     def search_records(
@@ -148,16 +178,42 @@ def create_server(
     @mcp.tool(description="Update a record status with optimistic locking.")
     def update_record_status(record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
         try:
+            parsed_status = RecordStatus(new_status)
+        except ValueError as exc:
+            audit_mcp_failure(
+                "update_record_status",
+                "rejected",
+                "invalid_status",
+                target_id=record_id,
+            )
+            return _fail("update_record_status_failed", str(exc))
+        try:
             updated = repo.update_record_status(
                 user_id,
                 record_id,
-                RecordStatus(new_status),
+                parsed_status,
                 expected_version=expected_version,
                 actor="mcp",
             )
             return _ok(record=_model(updated))
-        except (ValidationError, ValueError) as exc:
+        except ValueError as exc:
+            audit_mcp_failure(
+                "update_record_status",
+                "failed",
+                "record_conflict_or_not_found",
+                target_id=record_id,
+                params={"new_status": new_status},
+            )
             return _fail("update_record_status_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "update_record_status",
+                "failed",
+                "internal_error",
+                target_id=record_id,
+                params={"new_status": new_status},
+            )
+            return _fail("update_record_status_failed", "Tool execution failed.")
 
     @mcp.tool(description="Create a reminder task after user confirmation.")
     def create_reminder(
@@ -169,11 +225,28 @@ def create_server(
         message: str | None = None,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
+        audit_params = {
+            "reminder_type": reminder_type if reminder_type in {item.value for item in ReminderType} else None
+        }
+        if not user_confirmed:
+            audit_mcp_failure(
+                "create_reminder",
+                "rejected",
+                "confirmation_required",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("confirmation_required", "Creating a reminder requires user_confirmed=true.")
+        if not idempotency_key:
+            audit_mcp_failure(
+                "create_reminder",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
         try:
-            if not user_confirmed:
-                return _fail("confirmation_required", "Creating a reminder requires user_confirmed=true.")
-            if not idempotency_key:
-                return _fail("missing_idempotency_key", "idempotency_key is required.")
             reminder = ReminderCreate(
                 record_id=record_id,
                 scheduled_at=_parse_datetime_required(scheduled_at),
@@ -181,10 +254,40 @@ def create_server(
                 message=message or f"LifeVault reminder for record {record_id}",
                 parent_id=parent_id,
             )
+        except (ValidationError, ValueError) as exc:
+            audit_mcp_failure(
+                "create_reminder",
+                "rejected",
+                "invalid_reminder",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("create_reminder_failed", str(exc))
+        audit_params = {
+            "reminder_type": reminder.reminder_type.value,
+            "scheduled_at": reminder.scheduled_at.isoformat(),
+        }
+        try:
             created = repo.create_reminder(user_id, reminder, idempotency_key=idempotency_key, actor="mcp")
             return _ok(reminder=_model(created))
-        except (ValidationError, ValueError) as exc:
+        except ValueError as exc:
+            audit_mcp_failure(
+                "create_reminder",
+                "failed",
+                "create_reminder_failed",
+                target_id=record_id,
+                params=audit_params,
+            )
             return _fail("create_reminder_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "create_reminder",
+                "failed",
+                "internal_error",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("create_reminder_failed", "Tool execution failed.")
 
     @mcp.tool(description="List reminders by status.")
     def list_reminders(status: str | None = None, limit: int = 100) -> dict[str, Any]:
@@ -199,6 +302,15 @@ def create_server(
     def snooze_reminder(reminder_id: str, new_scheduled_at: str) -> dict[str, Any]:
         try:
             scheduled_at = _parse_datetime_required(new_scheduled_at)
+        except ValueError as exc:
+            audit_mcp_failure(
+                "snooze_reminder",
+                "rejected",
+                "invalid_scheduled_at",
+                target_id=reminder_id,
+            )
+            return _fail("snooze_reminder_failed", str(exc))
+        try:
             idempotency_key = stable_key("snooze", user_id, reminder_id, scheduled_at.isoformat())
             reminder = repo.snooze_reminder(
                 user_id,
@@ -209,18 +321,91 @@ def create_server(
             )
             parent = repo.get_reminder(user_id, reminder_id)
             return _ok(reminder=_model(reminder), parent_reminder=_model(parent) if parent else None)
-        except (ValidationError, ValueError) as exc:
+        except ValueError as exc:
+            audit_mcp_failure(
+                "snooze_reminder",
+                "failed",
+                "snooze_reminder_failed",
+                target_id=reminder_id,
+                params={"new_scheduled_at": scheduled_at.isoformat()},
+            )
             return _fail("snooze_reminder_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "snooze_reminder",
+                "failed",
+                "internal_error",
+                target_id=reminder_id,
+                params={"new_scheduled_at": scheduled_at.isoformat()},
+            )
+            return _fail("snooze_reminder_failed", "Tool execution failed.")
 
     @mcp.tool(description="Cancel a reminder. Requires user_confirmed=true.")
     def cancel_reminder(reminder_id: str, user_confirmed: bool) -> dict[str, Any]:
+        if not user_confirmed:
+            audit_mcp_failure(
+                "cancel_reminder",
+                "rejected",
+                "confirmation_required",
+                target_id=reminder_id,
+            )
+            return _fail("confirmation_required", "Reminder cancellation requires user confirmation.")
         try:
-            cancelled = repo.cancel_reminder(user_id, reminder_id, user_confirmed=user_confirmed)
+            cancelled = repo.cancel_reminder(
+                user_id,
+                reminder_id,
+                user_confirmed=user_confirmed,
+                actor="mcp",
+            )
             return _ok(reminder=_model(cancelled))
         except PermissionError as exc:
+            audit_mcp_failure(
+                "cancel_reminder",
+                "rejected",
+                "confirmation_required",
+                target_id=reminder_id,
+            )
             return _fail("confirmation_required", str(exc))
         except ValueError as exc:
+            audit_mcp_failure(
+                "cancel_reminder",
+                "failed",
+                "cancel_reminder_failed",
+                target_id=reminder_id,
+            )
             return _fail("cancel_reminder_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "cancel_reminder",
+                "failed",
+                "internal_error",
+                target_id=reminder_id,
+            )
+            return _fail("cancel_reminder_failed", "Tool execution failed.")
+
+    @mcp.tool(description="List immutable audit events for the configured local user.")
+    def list_audit_logs(
+        actor: str | None = None,
+        action: str | None = None,
+        result: str | None = None,
+        before_id: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        try:
+            logs = repo.list_audit_logs(
+                user_id,
+                actor=actor,
+                action=action,
+                result=result,
+                before_id=before_id,
+                limit=limit,
+            )
+            return _ok(
+                audit_logs=[_model(log) for log in logs],
+                next_before_id=logs[-1].id if len(logs) == limit else None,
+            )
+        except ValueError as exc:
+            return _fail("list_audit_logs_failed", str(exc))
 
     return mcp
 

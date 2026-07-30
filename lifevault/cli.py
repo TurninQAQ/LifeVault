@@ -56,6 +56,14 @@ def main() -> None:
     reminders = sub.add_parser("reminders", help="List reminders")
     reminders.add_argument("--status", choices=[status.value for status in ReminderStatus], default=None)
 
+    audit = sub.add_parser("audit", help="List immutable audit events")
+    audit.add_argument("--actor", default=None)
+    audit.add_argument("--action", default=None)
+    audit.add_argument("--result", choices=["ok", "rejected", "failed"], default=None)
+    audit.add_argument("--before-id", type=int, default=None)
+    audit.add_argument("--limit", type=int, default=50)
+    audit.add_argument("--json", action="store_true", help="Print the MCP response as JSON")
+
     snooze = sub.add_parser("snooze-reminder", help="Snooze a reminder")
     snooze.add_argument("reminder_id")
     snooze_group = snooze.add_mutually_exclusive_group()
@@ -196,6 +204,26 @@ def main() -> None:
             print(
                 f"{reminder['id']} | {reminder['record_id']} | {reminder['status']} | "
                 f"{reminder['scheduled_at']} | {reminder['message']}"
+            )
+        return
+
+    if args.command == "audit":
+        result = mcp_client.list_audit_logs(
+            actor=args.actor,
+            action=args.action,
+            result=args.result,
+            before_id=args.before_id,
+            limit=args.limit,
+        )
+        audit_logs = require_mcp_ok("list_audit_logs", result).get("audit_logs", [])
+        if args.json:
+            print_json(result)
+            return
+        for log in audit_logs:
+            print(
+                f"{log['id']} | {log['created_at']} | {log['actor']} | "
+                f"{log['action']} | {log['result']} | {log.get('target_id') or '-'} | "
+                f"{log.get('params_summary') or '-'}"
             )
         return
 

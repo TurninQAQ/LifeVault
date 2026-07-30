@@ -18,6 +18,7 @@ class McpBoundaryTest(unittest.TestCase):
         for forbidden in [
             "repository.search_records",
             "repository.list_reminders",
+            "repository.list_audit_logs",
             "repository.update_record_status",
             "repository.cancel_reminder",
         ]:
@@ -25,6 +26,7 @@ class McpBoundaryTest(unittest.TestCase):
         for required in [
             "mcp_client.search_records",
             "mcp_client.list_reminders",
+            "mcp_client.list_audit_logs",
             "mcp_client.snooze_reminder",
             "mcp_client.update_record_status",
             "mcp_client.list_upcoming_subscriptions",
@@ -36,6 +38,7 @@ class McpBoundaryTest(unittest.TestCase):
         for forbidden in [
             "repository.search_records",
             "repository.list_reminders",
+            "repository.list_audit_logs",
             "repository.update_record_status",
             "repository.cancel_reminder",
         ]:
@@ -43,6 +46,7 @@ class McpBoundaryTest(unittest.TestCase):
         for required in [
             "mcp_client.search_records",
             "mcp_client.list_reminders",
+            "mcp_client.list_audit_logs",
             "mcp_client.snooze_reminder",
             "mcp_client.update_record_status",
             "mcp_client.cancel_reminder",
