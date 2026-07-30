@@ -5,10 +5,12 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from lifevault.tools.date_tools import (
+    calculate_calendar_month_deadline,
     calculate_deadline,
     calculate_next_renewal_date,
     calculate_reminder_at,
     parse_date_text,
+    parse_int,
     parse_subscription_renewal_date,
 )
 
@@ -81,6 +83,21 @@ class DateToolsTest(unittest.TestCase):
 
         self.assertEqual(non_leap_year, date(2025, 2, 28))
         self.assertEqual(leap_year, date(2028, 2, 29))
+
+    def test_calendar_month_deadline_clamps_month_end(self) -> None:
+        self.assertEqual(
+            calculate_calendar_month_deadline(date(2027, 1, 31), 1),
+            date(2027, 2, 28),
+        )
+        self.assertEqual(
+            calculate_calendar_month_deadline(date(2027, 2, 28), 12),
+            date(2028, 2, 28),
+        )
+
+    def test_parse_chinese_integer_up_to_reminder_limit(self) -> None:
+        self.assertEqual(parse_int("一百二十"), 120)
+        self.assertEqual(parse_int("三百六十五"), 365)
+        self.assertEqual(parse_int("一百零五"), 105)
 
 
 if __name__ == "__main__":

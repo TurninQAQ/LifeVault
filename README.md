@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.12 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.13 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 ## Current MVP
 
@@ -80,6 +80,16 @@ v0.12 turns subscription renewal reminders into a recurring loop:
 - A long Worker pause fast-forwards to the next reminder that is still in the future instead of emitting several obsolete cycles.
 - Manual renewals, cancelled subscriptions, cancelled renewal reminders, and subscriptions whose reminder was skipped are not rolled forward automatically.
 
+v0.13 adds typed purchase deadlines and atomic multi-reminder workflows:
+
+- Purchase records can carry independent `return_deadline` and `warranty_deadline` values. Warranty dates support explicit dates or calendar-month durations with safe month-end handling.
+- Reminder intent and advance days are extracted independently for return and warranty deadlines. No reminder is proposed unless the user asks for one.
+- LangGraph previews all reminder candidates in one interrupt. Streamlit can select individual reminders, while CLI confirmation selects the complete batch.
+- MCP `create_reminders` validates one to five reminders for a single record and commits them atomically. A persisted request hash makes exact retries idempotent and rejects reuse of the same key with different content.
+- Batch audits contain only reminder count and type summaries. Existing single-reminder MCP calls and v0.12 checkpoints remain compatible.
+- Completed purchases still receive warranty reminders; returned or cancelled purchases do not.
+- The fallback evaluation now contains 72 cases and passes 72/72 cases and 448/448 expected fields.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -118,6 +128,7 @@ python3 -m lifevault.cli init-db
 
 ```bash
 python -m lifevault.cli add "我昨天在京东买了一个耳机，3499 元，订单号 123456，七天无理由，退货前两天提醒我。" --yes
+python -m lifevault.cli add "我 2026-07-25 买了一个相机，5000 元，七天退货，保修两年，退货前 2 天、保修到期前 60 天提醒我。" --yes
 python -m lifevault.cli add "我订阅了腾讯视频会员，每月 30 元，每月 15 号自动续费，续费前 3 天提醒我。" --yes
 python -m lifevault.cli list
 python -m lifevault.cli subscriptions --days 30
@@ -176,13 +187,14 @@ find_duplicate
 update_record_status
 update_preferences
 create_reminder
+create_reminders
 list_reminders
 snooze_reminder
 cancel_reminder
 list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and reminder creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference updates are host/UI operations and are not part of the model-generated tool plan.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and atomic reminder-batch creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference updates are host/UI operations and are not part of the model-generated tool plan.
 
 ## Streamlit
 

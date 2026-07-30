@@ -15,6 +15,7 @@ from lifevault.models.schemas import (
     RecordStatus,
     RecordType,
     Reminder,
+    ReminderBatchCreate,
     ReminderCreate,
     ReminderStatus,
     ReminderType,
@@ -23,6 +24,7 @@ from lifevault.models.schemas import (
     UserPreferenceUpdateResult,
 )
 from lifevault.storage.database import connect, init_db
+from lifevault.tools.idempotency import stable_key
 
 
 def _utc_now() -> datetime:
@@ -235,12 +237,23 @@ class VaultRepository:
             placeholders = ",".join("?" for _ in record_types)
             sql += f" AND type IN ({placeholders})"
             params.extend(record_type.value for record_type in record_types)
-        if date_from:
-            sql += " AND (deadline IS NULL OR deadline >= ?)"
-            params.append(date_from.isoformat())
-        if date_to:
-            sql += " AND (deadline IS NULL OR deadline <= ?)"
-            params.append(date_to.isoformat())
+        if date_from or date_to:
+            date_expressions = [
+                "deadline",
+                "json_extract(details_json, '$.return_deadline')",
+                "json_extract(details_json, '$.warranty_deadline')",
+            ]
+            date_conditions: list[str] = []
+            for expression in date_expressions:
+                bounds: list[str] = [f"{expression} IS NOT NULL"]
+                if date_from:
+                    bounds.append(f"{expression} >= ?")
+                    params.append(date_from.isoformat())
+                if date_to:
+                    bounds.append(f"{expression} <= ?")
+                    params.append(date_to.isoformat())
+                date_conditions.append(f"({' AND '.join(bounds)})")
+            sql += f" AND ({' OR '.join(date_conditions)})"
         if query:
             like = f"%{query}%"
             sql += " AND (title LIKE ? OR details_json LIKE ? OR source_text_preview LIKE ?)"
@@ -620,6 +633,139 @@ class VaultRepository:
             )
             row = conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
             return self._row_to_reminder(row)
+
+    def create_reminders(
+        self,
+        user_id: str,
+        batch: ReminderBatchCreate,
+        actor: str = "mcp",
+    ) -> list[Reminder]:
+        with connect(self.database_path) as conn:
+            request_hash = stable_key(
+                "reminder-batch-request",
+                json.dumps(
+                    [reminder.model_dump(mode="json") for reminder in batch.reminders],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            existing_batch = conn.execute(
+                """
+                SELECT request_hash, reminder_ids_json
+                FROM reminder_batches
+                WHERE user_id = ? AND idempotency_key = ?
+                """,
+                (user_id, batch.idempotency_key),
+            ).fetchone()
+            if existing_batch:
+                if existing_batch["request_hash"] != request_hash:
+                    raise ValueError("Batch idempotency key was already used for different reminders.")
+                reminder_ids = json.loads(existing_batch["reminder_ids_json"])
+                rows = [
+                    conn.execute(
+                        "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                        (user_id, reminder_id),
+                    ).fetchone()
+                    for reminder_id in reminder_ids
+                ]
+                if any(row is None for row in rows):
+                    raise ValueError("Stored reminder batch is incomplete.")
+                return [self._row_to_reminder(row) for row in rows]
+
+            record = conn.execute(
+                "SELECT id FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, batch.record_id),
+            ).fetchone()
+            if not record:
+                raise ValueError("Record not found.")
+
+            rows: list[Any] = []
+            now = _utc_now().isoformat()
+            for index, reminder in enumerate(batch.reminders):
+                item_key = stable_key(
+                    "reminder-batch-item",
+                    user_id,
+                    batch.idempotency_key,
+                    index,
+                    reminder.record_id,
+                    reminder.reminder_type.value,
+                    reminder.scheduled_at.isoformat(),
+                )
+                row = conn.execute(
+                    "SELECT * FROM reminders WHERE user_id = ? AND idempotency_key = ?",
+                    (user_id, item_key),
+                ).fetchone()
+                if not row:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM reminders
+                        WHERE user_id = ? AND record_id = ? AND reminder_type = ? AND scheduled_at = ?
+                        """,
+                        (
+                            user_id,
+                            reminder.record_id,
+                            reminder.reminder_type.value,
+                            _dt_to_text(reminder.scheduled_at),
+                        ),
+                    ).fetchone()
+                if not row:
+                    reminder_id = str(uuid4())
+                    conn.execute(
+                        """
+                        INSERT INTO reminders(
+                            id, record_id, user_id, scheduled_at, reminder_type, message, status,
+                            parent_id, idempotency_key, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            reminder_id,
+                            reminder.record_id,
+                            user_id,
+                            _dt_to_text(reminder.scheduled_at),
+                            reminder.reminder_type.value,
+                            reminder.message,
+                            ReminderStatus.PENDING.value,
+                            reminder.parent_id,
+                            item_key,
+                            now,
+                            now,
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM reminders WHERE id = ?",
+                        (reminder_id,),
+                    ).fetchone()
+                rows.append(row)
+
+            conn.execute(
+                """
+                INSERT INTO reminder_batches(
+                    user_id, idempotency_key, request_hash, reminder_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    batch.idempotency_key,
+                    request_hash,
+                    json.dumps([row["id"] for row in rows]),
+                    now,
+                ),
+            )
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action="create_reminders",
+                target_id=batch.record_id,
+                result="ok",
+                params={
+                    "reminder_count": len(batch.reminders),
+                    "reminder_types": [
+                        reminder.reminder_type.value for reminder in batch.reminders
+                    ],
+                },
+            )
+            return [self._row_to_reminder(row) for row in rows]
 
     def list_reminders(
         self,

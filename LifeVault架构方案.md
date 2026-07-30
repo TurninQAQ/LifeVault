@@ -221,6 +221,7 @@ Worker 是独立于聊天流程的确定性后台进程。它每分钟扫描 SQL
 | `bill_details` | `record_id`, `billing_period`, `due_date`, `paid_at` |
 | `source_documents` | `id`, `record_id`, `content_hash`, `file_path`, `extracted_text` |
 | `reminders` | `id`, `record_id`, `scheduled_at`, `status`, `parent_id`, `idempotency_key` |
+| `reminder_batches` | `user_id`, `idempotency_key`, `request_hash`, `reminder_ids_json` |
 | `user_preferences` | `user_id`, `default_time`, `quiet_hours`, `default_advance_days` |
 | `graph_checkpoints` | `thread_id`, `checkpoint_data`, `updated_at` |
 | `audit_logs` | `actor`, `action`, `target_id`, `result`, `created_at` |

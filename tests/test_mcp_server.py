@@ -20,6 +20,7 @@ class McpServerTest(unittest.TestCase):
                 "find_duplicate",
                 "update_record_status",
                 "create_reminder",
+                "create_reminders",
                 "list_reminders",
                 "snooze_reminder",
                 "cancel_reminder",
@@ -39,6 +40,7 @@ class McpServerTest(unittest.TestCase):
             self.assertEqual(result["rejected_save"]["error"]["code"], "confirmation_required")
             self.assertFalse(result["rejected_create_reminder"]["ok"])
             self.assertEqual(result["rejected_create_reminder"]["error"]["code"], "confirmation_required")
+            self.assertEqual(result["batch_reminder_count"], 2)
             self.assertFalse(result["rejected_cancel"]["ok"])
             self.assertEqual(result["rejected_cancel"]["error"]["code"], "confirmation_required")
             self.assertTrue(result["accepted_cancel"]["ok"])

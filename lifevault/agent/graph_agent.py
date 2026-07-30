@@ -34,12 +34,16 @@ class LifeVaultGraphState(TypedDict, total=False):
     duplicate_candidates: list[dict[str, Any]]
     duplicate_decision: Literal["continue", "cancel"]
     record: dict[str, Any]
+    reminders: list[dict[str, Any]]
     reminder: dict[str, Any]
     record_confirmed: bool
+    reminders_confirmed: bool
     reminder_confirmed: bool
     saved_record_id: str
     saved_record: dict[str, Any]
+    reminder_ids: list[str]
     reminder_id: str
+    saved_reminders: list[dict[str, Any]]
     saved_reminder: dict[str, Any]
     cancelled: bool
     errors: list[str]
@@ -232,11 +236,28 @@ class GraphAgent:
                 "errors": [*state.get("errors", []), _mcp_error_message("find_duplicate", duplicate_result)],
             }
         duplicates = duplicate_result.get("duplicate_candidates", [])
-        reminder = self.service._build_reminder(candidate, record, preference)
+        reminders, reminder_warnings = self.service._build_reminders(
+            candidate,
+            record,
+            preference,
+            now,
+        )
+        _return_deadline, _warranty_deadline, deadline_warnings = (
+            self.service._purchase_deadlines(candidate, record.event_date, now)
+            if record.record_type.value == "purchase"
+            else (None, None, [])
+        )
+        reminder_payloads = [reminder.model_dump(mode="json") for reminder in reminders]
         return {
             "record": record.model_dump(mode="json"),
             "duplicate_candidates": duplicates,
-            "reminder": reminder.model_dump(mode="json") if reminder else {},
+            "reminders": reminder_payloads,
+            "reminder": reminder_payloads[0] if reminder_payloads else {},
+            "warnings": [
+                *state.get("warnings", []),
+                *deadline_warnings,
+                *reminder_warnings,
+            ],
         }
 
     def _review_duplicate_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
@@ -311,60 +332,104 @@ class GraphAgent:
         }
 
     def _confirm_reminder_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
-        reminder_data = state.get("reminder") or {}
+        reminder_data = _state_reminders(state)
         if not reminder_data:
-            return {"reminder_confirmed": False}
+            return {
+                "reminders": [],
+                "reminder": {},
+                "reminders_confirmed": False,
+                "reminder_confirmed": False,
+            }
 
-        reminder = ReminderCreate.model_validate(reminder_data)
-        reminder = reminder.model_copy(update={"record_id": state["saved_record_id"]})
-        reminder_preview = reminder.model_dump(mode="json")
+        reminder_previews = [
+            ReminderCreate.model_validate(reminder).model_copy(
+                update={"record_id": state["saved_record_id"]}
+            ).model_dump(mode="json")
+            for reminder in reminder_data
+        ]
         payload = interrupt(
             {
                 "type": "reminder_confirmation",
-                "prompt": "请确认是否创建这条提醒。",
+                "prompt": "请选择并确认要创建的提醒。",
                 "record": state.get("saved_record") or state.get("record"),
-                "reminder": reminder_preview,
+                "reminders": reminder_previews,
+                "reminder": reminder_previews[0],
+                "warnings": state.get("warnings", []),
             }
         )
         action = _payload_action(payload)
         if action == "confirm":
+            selected_keys = _payload_selected_reminder_keys(payload)
+            selected_types = _payload_selected_reminder_types(payload)
+            if selected_keys is not None:
+                selected = [
+                    reminder
+                    for reminder in reminder_previews
+                    if _reminder_selection_key(reminder) in selected_keys
+                ]
+            elif selected_types is not None:
+                selected = [
+                    reminder
+                    for reminder in reminder_previews
+                    if reminder["reminder_type"] in selected_types
+                ]
+            else:
+                selected = reminder_previews
             return {
-                "reminder": reminder_preview,
-                "reminder_confirmed": True,
+                "reminders": selected,
+                "reminder": selected[0] if selected else {},
+                "reminders_confirmed": bool(selected),
+                "reminder_confirmed": bool(selected),
             }
         return {
-            "reminder": reminder_preview,
+            "reminders": [],
+            "reminder": {},
+            "reminders_confirmed": False,
             "reminder_confirmed": False,
         }
 
     def _create_reminder_node(self, state: LifeVaultGraphState) -> dict[str, Any]:
-        if state.get("reminder_id") and state.get("saved_reminder"):
+        if (
+            (state.get("reminder_ids") and state.get("saved_reminders"))
+            or (state.get("reminder_id") and state.get("saved_reminder"))
+        ):
             return {}
-        reminder = ReminderCreate.model_validate(state["reminder"])
-        reminder_key = stable_key(
-            "reminder",
+        reminders = [
+            ReminderCreate.model_validate(reminder)
+            for reminder in _state_reminders(state)
+        ]
+        if not reminders:
+            return {}
+        batch_key = stable_key(
+            "reminder-batch",
             self.settings.default_user_id,
-            reminder.record_id,
-            reminder.reminder_type.value,
-            reminder.scheduled_at.isoformat(),
+            state["saved_record_id"],
+            *[
+                f"{reminder.reminder_type.value}:{reminder.scheduled_at.isoformat()}"
+                for reminder in reminders
+            ],
         )
-        create_result = self.mcp_client.create_reminder(
-            record_id=reminder.record_id,
-            scheduled_at=reminder.scheduled_at.isoformat(),
-            reminder_type=reminder.reminder_type.value,
-            idempotency_key=reminder_key,
-            user_confirmed=bool(state.get("reminder_confirmed")),
-            message=reminder.message,
-            parent_id=reminder.parent_id,
+        create_result = self.mcp_client.create_reminders(
+            [reminder.model_dump(mode="json") for reminder in reminders],
+            idempotency_key=batch_key,
+            user_confirmed=bool(
+                state.get("reminders_confirmed") or state.get("reminder_confirmed")
+            ),
         )
         if not create_result.get("ok"):
             return {
-                "errors": [*state.get("errors", []), _mcp_error_message("create_reminder", create_result)],
+                "errors": [
+                    *state.get("errors", []),
+                    _mcp_error_message("create_reminders", create_result),
+                ],
             }
-        saved_reminder = create_result["reminder"]
+        saved_reminders = create_result.get("reminders", [])
+        reminder_ids = [reminder["id"] for reminder in saved_reminders]
         return {
-            "reminder_id": saved_reminder["id"],
-            "saved_reminder": saved_reminder,
+            "reminder_ids": reminder_ids,
+            "reminder_id": reminder_ids[0] if reminder_ids else "",
+            "saved_reminders": saved_reminders,
+            "saved_reminder": saved_reminders[0] if saved_reminders else {},
         }
 
     def _route_after_validate(self, state: LifeVaultGraphState) -> str:
@@ -390,7 +455,7 @@ class GraphAgent:
         return "confirm_reminder"
 
     def _route_after_reminder_confirmation(self, state: LifeVaultGraphState) -> str:
-        if state.get("reminder_confirmed"):
+        if state.get("reminders_confirmed") or state.get("reminder_confirmed"):
             return "create"
         return "end"
 
@@ -430,10 +495,22 @@ class GraphAgent:
             status: Literal["running", "interrupted", "completed", "cancelled"] = "interrupted"
         elif state.get("cancelled"):
             status = "cancelled"
-        elif state.get("saved_record_id") or state.get("reminder_id"):
+        elif state.get("saved_record_id") or state.get("reminder_ids") or state.get("reminder_id"):
             status = "completed"
         else:
             status = "running"
+
+        active_reminders = _coerce_reminder_dicts(
+            (interrupt_payload or {}).get("reminders")
+            or (interrupt_payload or {}).get("reminder")
+            or state.get("saved_reminders")
+            or state.get("saved_reminder")
+            or state.get("reminders")
+            or state.get("reminder")
+        )
+        active_reminder_ids = list(state.get("reminder_ids") or [])
+        if not active_reminder_ids and state.get("reminder_id"):
+            active_reminder_ids = [state["reminder_id"]]
 
         return GraphTurn(
             thread_id=thread_id,
@@ -448,9 +525,12 @@ class GraphAgent:
             ),
             candidate=(interrupt_payload or {}).get("candidate", state.get("candidate")),
             record=(interrupt_payload or {}).get("record", state.get("saved_record") or state.get("record")),
-            reminder=(interrupt_payload or {}).get("reminder", state.get("saved_reminder") or state.get("reminder")),
+            reminders=active_reminders,
+            reminder=active_reminders[0] if active_reminders else None,
             saved_record_id=state.get("saved_record_id"),
-            reminder_id=state.get("reminder_id"),
+            reminder_ids=active_reminder_ids,
+            reminder_id=active_reminder_ids[0] if active_reminder_ids else None,
+            warnings=(interrupt_payload or {}).get("warnings", state.get("warnings", [])),
             errors=state.get("errors", []),
         )
 
@@ -472,6 +552,44 @@ def _payload_text(payload: str | dict[str, Any]) -> str:
     return str(payload).strip()
 
 
+def _payload_selected_reminder_types(
+    payload: str | dict[str, Any],
+) -> set[str] | None:
+    if not isinstance(payload, dict) or "selected_reminder_types" not in payload:
+        return None
+    value = payload.get("selected_reminder_types")
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value}
+
+
+def _payload_selected_reminder_keys(
+    payload: str | dict[str, Any],
+) -> set[str] | None:
+    if not isinstance(payload, dict) or "selected_reminder_keys" not in payload:
+        return None
+    value = payload.get("selected_reminder_keys")
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value}
+
+
+def _reminder_selection_key(reminder: dict[str, Any]) -> str:
+    return f"{reminder.get('reminder_type', '')}|{reminder.get('scheduled_at', '')}"
+
+
+def _state_reminders(state: LifeVaultGraphState) -> list[dict[str, Any]]:
+    return _coerce_reminder_dicts(state.get("reminders") or state.get("reminder"))
+
+
+def _coerce_reminder_dicts(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict) and item]
+    return []
+
+
 def _meaningful_candidate_value(field: str, value: Any, text: str) -> bool:
     if _is_emptyish(value):
         return False
@@ -481,7 +599,11 @@ def _meaningful_candidate_value(field: str, value: Any, text: str) -> bool:
         return any(token in text for token in ["订单", "买", "购买", "订阅", "会员", "账单", "房租", "缴费"])
     if field == "currency":
         return False
-    if field == "reminder_requested":
+    if field in {
+        "reminder_requested",
+        "return_reminder_requested",
+        "warranty_reminder_requested",
+    }:
         return bool(value) or any(token in text for token in ["不提醒", "不用提醒", "取消提醒"])
     return True
 

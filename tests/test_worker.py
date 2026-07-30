@@ -179,6 +179,88 @@ class ReminderWorkerTest(unittest.TestCase):
             self.assertEqual(audit[0].target_id, reminder_id)
             self.assertIn('"record_status": "completed"', audit[0].params_summary or "")
 
+    def test_completed_purchase_still_sends_warranty_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            now = aware_now()
+            record = repo.save_record(
+                settings.default_user_id,
+                LifeRecordCreate(
+                    record_type=RecordType.PURCHASE,
+                    title="已保留相机",
+                    amount=5000,
+                    deadline=now.date(),
+                    status=RecordStatus.COMPLETED,
+                ),
+                "completed-warranty-record",
+            )
+            reminder = repo.create_reminder(
+                settings.default_user_id,
+                ReminderCreate(
+                    record_id=record.id,
+                    scheduled_at=now - timedelta(minutes=5),
+                    reminder_type=ReminderType.WARRANTY_DEADLINE,
+                    message="保修即将结束",
+                ),
+                "completed-warranty-reminder",
+            )
+            desktop = RecordingProvider()
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=desktop,
+                console_provider=RecordingProvider(),
+            )
+
+            self.assertEqual(worker.run_once(now), 1)
+
+            self.assertEqual(
+                repo.get_reminder(settings.default_user_id, reminder.id).status,
+                ReminderStatus.SENT,
+            )
+            self.assertEqual(desktop.calls, [("LifeVault 到期提醒", "保修即将结束", record.id)])
+
+    def test_returned_purchase_cancels_warranty_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings, repo = make_repo(tmp)
+            now = aware_now()
+            record = repo.save_record(
+                settings.default_user_id,
+                LifeRecordCreate(
+                    record_type=RecordType.PURCHASE,
+                    title="已退相机",
+                    amount=5000,
+                    deadline=now.date(),
+                    status=RecordStatus.RETURNED,
+                ),
+                "returned-warranty-record",
+            )
+            reminder = repo.create_reminder(
+                settings.default_user_id,
+                ReminderCreate(
+                    record_id=record.id,
+                    scheduled_at=now - timedelta(minutes=5),
+                    reminder_type=ReminderType.WARRANTY_DEADLINE,
+                    message="不应发送",
+                ),
+                "returned-warranty-reminder",
+            )
+            desktop = RecordingProvider()
+            worker = ReminderWorker(
+                settings,
+                repo,
+                desktop_provider=desktop,
+                console_provider=RecordingProvider(),
+            )
+
+            self.assertEqual(worker.run_once(now), 1)
+
+            self.assertEqual(
+                repo.get_reminder(settings.default_user_id, reminder.id).status,
+                ReminderStatus.CANCELLED,
+            )
+            self.assertEqual(desktop.calls, [])
+
     def test_desktop_failure_falls_back_to_console_and_marks_failed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings, repo = make_repo(tmp)

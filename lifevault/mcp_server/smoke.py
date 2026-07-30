@@ -177,6 +177,29 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                         "user_confirmed": False,
                     },
                 )
+                batch_reminders = await call_json(
+                    session,
+                    "create_reminders",
+                    {
+                        "reminders": [
+                            {
+                                "record_id": record_id,
+                                "scheduled_at": "2026-08-01T08:00:00+08:00",
+                                "reminder_type": "return_deadline",
+                                "message": "MCP batch return reminder",
+                            },
+                            {
+                                "record_id": record_id,
+                                "scheduled_at": "2027-07-25T09:00:00+08:00",
+                                "reminder_type": "warranty_deadline",
+                                "message": "MCP batch warranty reminder",
+                            },
+                        ],
+                        "idempotency_key": f"mcp-smoke-reminder-batch-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("create_reminders", batch_reminders)
                 list_result = await call_json(session, "list_reminders", {"status": "pending"})
                 require_ok("list_reminders", list_result)
                 snooze_result = await call_json(
@@ -230,6 +253,7 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "snoozed_child_id": child_reminder_id,
                     "rejected_save": rejected_save,
                     "rejected_create_reminder": rejected_create_reminder,
+                    "batch_reminder_count": len(batch_reminders["reminders"]),
                     "rejected_cancel": rejected_cancel,
                     "accepted_cancel": accepted_cancel,
                     "updated_record_status": update_status_result["record"]["status"],

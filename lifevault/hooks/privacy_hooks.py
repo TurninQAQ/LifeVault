@@ -15,6 +15,7 @@ AUDIT_PARAM_ALLOWLIST = {
     "save_record": frozenset({"record_type", "error_code"}),
     "update_record_status": frozenset({"new_status", "error_code"}),
     "create_reminder": frozenset({"reminder_type", "scheduled_at", "error_code"}),
+    "create_reminders": frozenset({"reminder_count", "reminder_types", "error_code"}),
     "snooze_reminder": frozenset({"new_reminder_id", "new_scheduled_at", "error_code"}),
     "cancel_reminder": frozenset({"record_status", "error_code"}),
     "send_reminder": frozenset({"delivery", "record_status", "error_code"}),
@@ -120,4 +121,11 @@ def _audit_value(key: str, value: Any) -> str | int | float | bool | list[str] |
                 if isinstance(field, str) and field in AUDIT_PREFERENCE_FIELDS
             }
         )
+    if key == "reminder_count":
+        return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5 else None
+    if key == "reminder_types":
+        if not isinstance(value, list):
+            return None
+        allowed = AUDIT_ENUM_VALUES["reminder_type"]
+        return sorted({item for item in value if isinstance(item, str) and item in allowed})
     return None

@@ -340,13 +340,15 @@ def print_graph_turn(turn: GraphTurn) -> None:
     if turn.record:
         print("Record:")
         print_json(turn.record)
-    if turn.reminder:
-        print("Reminder:")
-        print_json(turn.reminder)
+    if turn.reminders:
+        print("Reminders:")
+        print(json.dumps(turn.reminders, ensure_ascii=False, indent=2))
     if turn.saved_record_id:
         print(f"Saved record: {turn.saved_record_id}")
-    if turn.reminder_id:
-        print(f"Created reminder: {turn.reminder_id}")
+    if turn.reminder_ids:
+        print("Created reminders: " + ", ".join(turn.reminder_ids))
+    if turn.warnings:
+        print("Warnings: " + "; ".join(turn.warnings))
     if turn.errors:
         print("Errors: " + "; ".join(turn.errors))
 
@@ -411,7 +413,7 @@ def prompt_payload(turn: GraphTurn) -> dict[str, str]:
     if turn.interrupt_type == "record_confirmation":
         return {"action": "confirm" if ask_yes_no("保存这条记录？") else "cancel"}
     if turn.interrupt_type == "reminder_confirmation":
-        return {"action": "confirm" if ask_yes_no("创建这条提醒？") else "skip"}
+        return {"action": "confirm" if ask_yes_no("创建这些提醒？") else "skip"}
     return {"action": "cancel"}
 
 

@@ -226,6 +226,34 @@ class RepositoryTest(unittest.TestCase):
             )
             self.assertEqual([record.title for record in manual_only], ["手动会员"])
 
+    def test_purchase_date_search_includes_typed_warranty_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = VaultRepository(Path(tmp) / "test.db")
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.PURCHASE,
+                    title="保修中的相机",
+                    amount=5000,
+                    event_date=date(2026, 7, 25),
+                    deadline=date(2026, 8, 1),
+                    details={
+                        "return_deadline": "2026-08-01",
+                        "warranty_deadline": "2027-07-25",
+                    },
+                ),
+                "purchase-with-warranty",
+            )
+
+            records = repo.search_records(
+                "local",
+                record_types=[RecordType.PURCHASE],
+                date_from=date(2027, 7, 1),
+                date_to=date(2027, 7, 31),
+            )
+
+            self.assertEqual([item.id for item in records], [record.id])
+
 
 if __name__ == "__main__":
     unittest.main()

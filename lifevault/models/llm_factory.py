@@ -107,8 +107,12 @@ class FallbackExtractor:
 
         record_type = _guess_record_type(text)
         amount = _extract_amount(text)
-        reminder_requested = any(keyword in text for keyword in ["提醒", "到期", "续费前", "截止前"])
+        reminder_requested = _extract_reminder_requested(text)
         remind_before_days = _extract_remind_before_days(text)
+        return_reminder_requested, warranty_reminder_requested = _extract_purchase_reminder_targets(
+            text,
+            reminder_requested,
+        )
 
         common: dict[str, Any] = {
             "intent": "create_record",
@@ -121,7 +125,12 @@ class FallbackExtractor:
                 else _extract_event_date_text(text)
             ),
             "reminder_requested": reminder_requested,
+            "return_reminder_requested": return_reminder_requested,
+            "warranty_reminder_requested": warranty_reminder_requested,
             "remind_before_days": remind_before_days,
+            "return_remind_before_days": _extract_target_remind_before_days(text, "退货"),
+            "warranty_remind_before_days": _extract_target_remind_before_days(text, "保修|质保"),
+            "reminder_time": _extract_reminder_time(text),
             "tool_plan": [
                 "parse_relative_date",
                 "calculate_deadline",
@@ -136,6 +145,9 @@ class FallbackExtractor:
                     "merchant": _extract_merchant(text),
                     "order_number": _extract_order_number(text),
                     "return_days": _extract_return_days(text),
+                    "warranty_months": _extract_warranty_months(text),
+                    "return_deadline_text": _extract_purchase_deadline_text(text, "退货"),
+                    "warranty_deadline_text": _extract_purchase_deadline_text(text, "保修|质保"),
                 }
             )
         elif record_type == RecordType.SUBSCRIPTION:
@@ -195,6 +207,8 @@ def build_extraction_prompt(text: str, now: datetime) -> str:
   "order_number": "订单号，不要猜",
   "return_days": 7,
   "warranty_months": null,
+  "return_deadline_text": "明确退货截止日期原文",
+  "warranty_deadline_text": "明确保修截止日期原文",
   "service_name": "订阅服务名",
   "billing_cycle": "monthly | yearly | weekly | unknown | null",
   "next_renewal_text": "订阅续费日期原文",
@@ -203,7 +217,11 @@ def build_extraction_prompt(text: str, now: datetime) -> str:
   "billing_period": "账单周期原文",
   "due_date_text": "缴费截止日期原文",
   "reminder_requested": true,
+  "return_reminder_requested": true,
+  "warranty_reminder_requested": false,
   "remind_before_days": 2,
+  "return_remind_before_days": 2,
+  "warranty_remind_before_days": 30,
   "reminder_time": "09:00 或用户明确时间",
   "notes": "其他备注",
   "search_query": "查询意图时的关键词",
@@ -215,6 +233,11 @@ def build_extraction_prompt(text: str, now: datetime) -> str:
 - 不要编造订单号、商家、金额、日期或政策。
 - 相对日期保留在 *_text 字段，由工具解析。
 - 截止日期不要自行计算，除非用户明确给出具体截止日期。
+- 商品保修时长统一换算为 warranty_months，例如一年填 12、两年填 24。
+- 退货和保修提醒意图分别填 return_reminder_requested 与 warranty_reminder_requested。
+- 只有“提醒我”但没有指定退货或保修时，只填 reminder_requested=true。
+- 用户没有要求提醒或明确说不用提醒时，所有 reminder_requested 字段为 false。
+- 退货和保修的提前天数分别填对应字段；通用提前天数填 remind_before_days。
 - 用户只是查询时，intent=search_records，search_query 填关键词。
 - 订阅/会员的 billing_cycle 只填 monthly/yearly/weekly/unknown/null。
 - 订阅/会员的 next_renewal_text 保留续费日期或规则原文，例如 2026-08-15、下个月15号、每月15号、每年7月15日。
@@ -342,7 +365,7 @@ def _extract_subscription_renewal_text(text: str) -> str | None:
         r"\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日号]?"
         r"|\d{1,2}月\d{1,2}[日号]"
         r"|\d{1,2}-\d{1,2}"
-        r"|今天|明天|后天|[一二两三四五六七八九十\d]+天后"
+        r"|今天|明天|后天|[零一二两三四五六七八九十百\d]+天后"
     )
     match = re.search(rf"(?:到期|续费|扣款)(?!前)(?:日|日期|时间)?(?:是|在|到)?\s*({date_expr})", text)
     if match:
@@ -356,15 +379,98 @@ def _extract_subscription_renewal_text(text: str) -> str | None:
 
 
 def _extract_remind_before_days(text: str) -> int | None:
-    match = re.search(r"(?:提前|前)\s*([一二两三四五六七八九十\d]+)\s*天提醒", text)
+    match = re.search(r"(?:提前|前)\s*([零一二两三四五六七八九十百\d]+)\s*天提醒", text)
     if not match:
-        match = re.search(r"提醒我.*?([一二两三四五六七八九十\d]+)\s*天", text)
+        match = re.search(r"提醒我.*?([零一二两三四五六七八九十百\d]+)\s*天", text)
     return parse_int(match.group(1)) if match else None
+
+
+def _extract_reminder_requested(text: str) -> bool:
+    if any(token in text for token in ["不用提醒", "不提醒", "无需提醒", "别提醒", "取消提醒"]):
+        return False
+    return "提醒" in text
+
+
+def _extract_purchase_reminder_targets(text: str, reminder_requested: bool) -> tuple[bool, bool]:
+    if not reminder_requested:
+        return False, False
+    if any(token in text for token in ["都提醒", "全部提醒", "两个期限都提醒", "这些期限都提醒"]):
+        return True, True
+
+    return_requested = bool(
+        re.search(r"退货(?:截止|到期)?\s*(?:前|提前)\s*[零一二两三四五六七八九十百\d]+\s*天", text)
+        or re.search(r"退货(?:截止|到期)?\s*提醒", text)
+    )
+    warranty_requested = bool(
+        re.search(
+            r"(?:保修|质保)(?:截止|到期)?\s*(?:前|提前)\s*[零一二两三四五六七八九十百\d]+\s*天",
+            text,
+        )
+        or re.search(r"(?:保修|质保)(?:截止|到期)?\s*提醒", text)
+    )
+    return return_requested, warranty_requested
+
+
+def _extract_target_remind_before_days(text: str, target: str) -> int | None:
+    patterns = [
+        rf"(?:{target})(?:截止|到期)?\s*(?:前|提前)\s*([零一二两三四五六七八九十百\d]+)\s*天",
+        rf"(?:{target}).{{0,8}}?提前\s*([零一二两三四五六七八九十百\d]+)\s*天",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return parse_int(match.group(1))
+    return None
 
 
 def _extract_return_days(text: str) -> int | None:
-    match = re.search(r"([一二两三四五六七八九十\d]+)\s*天(?:无理由|退货|可退)", text)
+    match = re.search(r"([零一二两三四五六七八九十百\d]+)\s*天(?:无理由|退货|可退)", text)
     return parse_int(match.group(1)) if match else None
+
+
+def _extract_warranty_months(text: str) -> int | None:
+    match = re.search(r"(?:保修|质保)(?:期)?\s*([零一二两三四五六七八九十百\d]+)\s*(年|个?月)", text)
+    if not match:
+        return None
+    value = parse_int(match.group(1))
+    if value is None:
+        return None
+    return value * 12 if match.group(2) == "年" else value
+
+
+def _extract_purchase_deadline_text(text: str, target: str) -> str | None:
+    date_expr = _date_text_pattern()
+    patterns = [
+        rf"(?:{target})(?:期)?(?:截止|到期)?(?:日|日期|时间)?(?:是|为|在|到|至)\s*({date_expr})",
+        rf"({date_expr})\s*(?:前)?(?:完成)?(?:{target})(?:截止|到期)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _compact_phrase(match.group(1))
+    return None
+
+
+def _extract_reminder_time(text: str) -> str | None:
+    match = re.search(
+        r"(?:(上午|早上|下午|晚上)\s*)?(\d{1,2})\s*(?::|：)\s*(\d{1,2})"
+        r"|(?:(上午|早上|下午|晚上)\s*)?(\d{1,2})\s*(?:点|时)(?:\s*(\d{1,2})\s*分?)?",
+        text,
+    )
+    if not match:
+        return None
+    period = match.group(1) or match.group(4)
+    hour_text = match.group(2) or match.group(5)
+    minute_text = match.group(3) or match.group(6)
+    hour = int(hour_text)
+    minute = int(minute_text or "0")
+    if period in {"下午", "晚上"} and hour < 12:
+        hour += 12
+    if period in {"上午", "早上"} and hour == 12:
+        hour = 0
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _extract_order_number(text: str) -> str | None:
@@ -438,7 +544,7 @@ def _clean_subscription_title(raw: str) -> str | None:
 
 
 def _date_text_pattern() -> str:
-    number = r"[一二两三四五六七八九十\d]+"
+    number = r"[零一二两三四五六七八九十百\d]+"
     return (
         rf"(?:\d{{4}}\s*[年/-]\s*\d{{1,2}}\s*[月/-]\s*\d{{1,2}}\s*[日号]?"
         rf"|(?:明年|下年|下一年)\s*{number}\s*月\s*{number}\s*[日号]"
@@ -446,7 +552,7 @@ def _date_text_pattern() -> str:
         rf"|{number}\s*月\s*{number}\s*[日号]"
         rf"|{number}\s*-\s*{number}"
         rf"|下周[一二三四五六日天]"
-        rf"|[一二两三四五六七八九十\d]+\s*天后"
+        rf"|[零一二两三四五六七八九十百\d]+\s*天后"
         rf"|今天|明天|后天|月底|本月底|这个月底)"
     )
 

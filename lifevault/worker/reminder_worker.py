@@ -6,7 +6,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from lifevault.config import Settings
-from lifevault.models.schemas import RecordStatus, ReminderCreate, ReminderType
+from lifevault.models.schemas import RecordStatus, RecordType, ReminderCreate, ReminderType
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import calculate_next_renewal_date, calculate_reminder_at
 from lifevault.tools.idempotency import stable_key
@@ -45,7 +45,7 @@ class ReminderWorker:
                 self.repository.mark_reminder_failed(self.settings.default_user_id, reminder.id, "record_not_found")
                 processed += 1
                 continue
-            if record.status != RecordStatus.ACTIVE:
+            if not _record_allows_reminder(record.record_type, record.status, reminder.reminder_type):
                 self.repository.mark_reminder_cancelled_by_worker(
                     self.settings.default_user_id,
                     reminder.id,
@@ -207,6 +207,20 @@ def _parse_clock_time(value: str | None) -> dt_time | None:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     return dt_time(hour=hour, minute=minute)
+
+
+def _record_allows_reminder(
+    record_type: RecordType,
+    record_status: RecordStatus,
+    reminder_type: ReminderType,
+) -> bool:
+    if record_status == RecordStatus.ACTIVE:
+        return True
+    return (
+        record_type == RecordType.PURCHASE
+        and record_status == RecordStatus.COMPLETED
+        and reminder_type == ReminderType.WARRANTY_DEADLINE
+    )
 
 
 def _normalize_now(value: datetime | None, timezone_name: str) -> datetime:

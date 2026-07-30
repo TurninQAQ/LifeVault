@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(user_id, status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_record ON reminders(record_id);
 
+CREATE TABLE IF NOT EXISTS reminder_batches (
+    user_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    reminder_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS user_preferences (
     user_id TEXT PRIMARY KEY,
     default_time TEXT NOT NULL,

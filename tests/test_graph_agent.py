@@ -86,6 +86,38 @@ class GraphAgentTest(unittest.TestCase):
             self.assertEqual(turn.interrupt_type, "reminder_confirmation")
             resumed_agent.close()
 
+    def test_legacy_single_reminder_checkpoint_resumes_after_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个键盘，899 元，七天退货，退货前 2 天提醒我。"
+            )
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            config = agent._config(turn.thread_id)
+            legacy_reminder = turn.reminder
+            agent._graph.update_state(
+                config,
+                {
+                    "reminders": [],
+                    "reminder": legacy_reminder,
+                    "reminder_ids": [],
+                    "saved_reminders": [],
+                },
+                as_node="save_record",
+            )
+            agent._graph.invoke(None, config=config)
+            agent.close()
+
+            resumed_agent = self.make_agent(tmp)
+            recovered = resumed_agent.get_state(turn.thread_id)
+            self.assertEqual(recovered.interrupt_type, "reminder_confirmation")
+            self.assertEqual(len(recovered.reminders), 1)
+
+            completed = resumed_agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(completed.status, "completed")
+            self.assertEqual(len(completed.reminder_ids), 1)
+            resumed_agent.close()
+
     def test_graph_uses_mcp_client_for_confirmed_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(
@@ -110,7 +142,7 @@ class GraphAgentTest(unittest.TestCase):
             self.assertEqual(mcp_client.calls[1][0], "find_duplicate")
             self.assertEqual(mcp_client.calls[2][0], "save_record")
             self.assertTrue(mcp_client.calls[2][1]["user_confirmed"])
-            self.assertEqual(mcp_client.calls[3][0], "create_reminder")
+            self.assertEqual(mcp_client.calls[3][0], "create_reminders")
             self.assertTrue(mcp_client.calls[3][1]["user_confirmed"])
             self.assertEqual(len(repo.search_records(settings.default_user_id, query="显示器")), 1)
             agent.close()
@@ -162,13 +194,91 @@ class GraphAgentTest(unittest.TestCase):
             self.assertEqual(turn.status, "completed")
             self.assertEqual(
                 [call[0] for call in mcp_client.calls],
-                ["get_preferences", "find_duplicate", "save_record", "create_reminder"],
+                ["get_preferences", "find_duplicate", "save_record", "create_reminders"],
             )
 
             records = repo.search_records(settings.default_user_id, query="腾讯视频")
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].record_type.value, "subscription")
             self.assertEqual(records[0].details["billing_cycle"], "monthly")
+            agent.close()
+
+    def test_purchase_dual_reminders_can_select_only_warranty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个相机，5000 元，七天退货，保修一年，"
+                "退货前 2 天、保修到期前 30 天提醒我。"
+            )
+
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertEqual(turn.record["details"]["return_deadline"], "2099-08-01")
+            self.assertEqual(turn.record["details"]["warranty_deadline"], "2100-07-25")
+            self.assertEqual(
+                [reminder["reminder_type"] for reminder in turn.reminders],
+                ["return_deadline", "warranty_deadline"],
+            )
+
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(turn.interrupt_type, "reminder_confirmation")
+            turn = agent.resume(
+                turn.thread_id,
+                {
+                    "action": "confirm",
+                    "selected_reminder_types": ["warranty_deadline"],
+                },
+            )
+
+            self.assertEqual(turn.status, "completed")
+            self.assertEqual(len(turn.reminder_ids), 1)
+            reminders = agent.repository.list_reminders("local")
+            self.assertEqual([reminder.reminder_type.value for reminder in reminders], ["warranty_deadline"])
+            agent.close()
+
+    def test_purchase_with_only_warranty_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个相机，5000 元，保修两年，保修到期前 90 天提醒我。"
+            )
+
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertNotIn("return_or_warranty_deadline", turn.missing_fields)
+            self.assertEqual(turn.record["deadline"], "2101-07-25")
+            self.assertEqual(len(turn.reminders), 1)
+            self.assertEqual(turn.reminders[0]["reminder_type"], "warranty_deadline")
+            agent.close()
+
+    def test_purchase_without_reminder_request_skips_reminder_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个键盘，899 元，七天退货，不用提醒。"
+            )
+
+            self.assertEqual(turn.interrupt_type, "record_confirmation")
+            self.assertEqual(turn.reminders, [])
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+
+            self.assertEqual(turn.status, "completed")
+            self.assertEqual(turn.reminder_ids, [])
+            self.assertEqual(agent.repository.list_reminders("local"), [])
+            agent.close()
+
+    def test_purchase_dual_reminders_can_all_be_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = self.make_agent(tmp)
+            turn = agent.start_create_record(
+                "我 2099-07-25 买了一个显示器，1299 元，七天退货，保修一年，这些期限都提醒我。"
+            )
+            turn = agent.resume(turn.thread_id, {"action": "confirm"})
+            self.assertEqual(len(turn.reminders), 2)
+
+            turn = agent.resume(turn.thread_id, {"action": "skip"})
+
+            self.assertEqual(turn.status, "completed")
+            self.assertEqual(turn.reminder_ids, [])
+            self.assertEqual(agent.repository.list_reminders("local"), [])
             agent.close()
 
 
@@ -227,6 +337,21 @@ class RecordingMcpClient:
             },
         )
 
+    def create_reminders(
+        self,
+        reminders: list[dict],
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict:
+        return self.call_tool(
+            "create_reminders",
+            {
+                "reminders": reminders,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
+            },
+        )
+
 
 class RejectSaveMcpClient:
     def call_tool(self, name: str, arguments: dict) -> dict:
@@ -265,6 +390,14 @@ class RejectSaveMcpClient:
         user_confirmed: bool,
         message: str | None = None,
         parent_id: str | None = None,
+    ) -> dict:
+        return {"ok": False, "error": {"code": "not_called", "message": "should not be called"}}
+
+    def create_reminders(
+        self,
+        reminders: list[dict],
+        idempotency_key: str,
+        user_confirmed: bool,
     ) -> dict:
         return {"ok": False, "error": {"code": "not_called", "message": "should not be called"}}
 

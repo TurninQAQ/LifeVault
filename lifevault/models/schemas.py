@@ -67,8 +67,10 @@ class ExtractedRecordCandidate(BaseModel):
 
     merchant: str | None = None
     order_number: str | None = None
-    return_days: int | None = None
-    warranty_months: int | None = None
+    return_days: int | None = Field(default=None, gt=0)
+    warranty_months: int | None = Field(default=None, gt=0)
+    return_deadline_text: str | None = None
+    warranty_deadline_text: str | None = None
 
     service_name: str | None = None
     billing_cycle: str | None = None
@@ -80,7 +82,11 @@ class ExtractedRecordCandidate(BaseModel):
     due_date_text: str | None = None
 
     reminder_requested: bool = False
-    remind_before_days: int | None = None
+    return_reminder_requested: bool = False
+    warranty_reminder_requested: bool = False
+    remind_before_days: int | None = Field(default=None, ge=0, le=365)
+    return_remind_before_days: int | None = Field(default=None, ge=0, le=365)
+    warranty_remind_before_days: int | None = Field(default=None, ge=0, le=365)
     reminder_time: str | None = None
     notes: str | None = None
     search_query: str | None = None
@@ -130,6 +136,28 @@ class ReminderCreate(BaseModel):
     parent_id: str | None = None
 
 
+class ReminderBatchCreate(BaseModel):
+    reminders: list[ReminderCreate] = Field(min_length=1, max_length=5)
+    idempotency_key: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_single_record(self) -> ReminderBatchCreate:
+        record_ids = {reminder.record_id for reminder in self.reminders}
+        if len(record_ids) != 1:
+            raise ValueError("All reminders in a batch must belong to the same record.")
+        unique_slots = {
+            (reminder.reminder_type, reminder.scheduled_at)
+            for reminder in self.reminders
+        }
+        if len(unique_slots) != len(self.reminders):
+            raise ValueError("A reminder batch cannot contain duplicate reminder slots.")
+        return self
+
+    @property
+    def record_id(self) -> str:
+        return self.reminders[0].record_id
+
+
 class Reminder(ReminderCreate):
     id: str
     user_id: str
@@ -166,8 +194,14 @@ class DraftResult(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
     record: LifeRecordCreate | None = None
+    reminders: list[ReminderCreate] = Field(default_factory=list)
     reminder: ReminderCreate | None = None
     warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_reminders(cls, value: Any) -> Any:
+        return _normalize_plural_fields(value, "reminders", "reminder")
 
     @property
     def is_ready_to_save(self) -> bool:
@@ -176,8 +210,14 @@ class DraftResult(BaseModel):
 
 class SaveResult(BaseModel):
     record: LifeRecord
+    reminders: list[Reminder] = Field(default_factory=list)
     reminder: Reminder | None = None
     duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_reminders(cls, value: Any) -> Any:
+        return _normalize_plural_fields(value, "reminders", "reminder")
 
 
 class GraphTurn(BaseModel):
@@ -190,10 +230,19 @@ class GraphTurn(BaseModel):
     duplicate_candidates: list[dict[str, Any]] = Field(default_factory=list)
     candidate: dict[str, Any] | None = None
     record: dict[str, Any] | None = None
+    reminders: list[dict[str, Any]] = Field(default_factory=list)
     reminder: dict[str, Any] | None = None
     saved_record_id: str | None = None
+    reminder_ids: list[str] = Field(default_factory=list)
     reminder_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_reminders(cls, value: Any) -> Any:
+        normalized = _normalize_plural_fields(value, "reminders", "reminder")
+        return _normalize_plural_fields(normalized, "reminder_ids", "reminder_id")
 
 
 class UserPreference(BaseModel):
@@ -246,6 +295,19 @@ class UserPreferencePatch(BaseModel):
         if quiet_start_set and ((self.quiet_hours_start is None) != (self.quiet_hours_end is None)):
             raise ValueError("Quiet hours must be set or cleared together.")
         return self
+
+
+def _normalize_plural_fields(value: Any, plural: str, singular: str) -> Any:
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    plural_value = normalized.get(plural)
+    singular_value = normalized.get(singular)
+    if not plural_value and singular_value:
+        normalized[plural] = [singular_value]
+    elif isinstance(plural_value, list) and plural_value and not singular_value:
+        normalized[singular] = plural_value[0]
+    return normalized
 
 
 class UserPreferenceUpdateResult(BaseModel):

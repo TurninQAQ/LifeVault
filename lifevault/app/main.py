@@ -88,6 +88,9 @@ def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
     if turn.errors:
         for error in turn.errors:
             st.error(error)
+    if turn.warnings:
+        for warning in turn.warnings:
+            st.warning(warning)
 
     if turn.interrupt_type == "missing_fields":
         st.error("缺少必要字段：" + "，".join(turn.missing_fields))
@@ -139,17 +142,34 @@ def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
             st.json(turn.record or {})
         with right:
             st.subheader("提醒预览")
-            st.json(turn.reminder or {})
+            selected_keys: list[str] = []
+            for index, reminder in enumerate(turn.reminders):
+                reminder_type = reminder["reminder_type"]
+                reminder_key = f"{reminder_type}|{reminder['scheduled_at']}"
+                selected = st.checkbox(
+                    f"{reminder_type} · {reminder['scheduled_at']}",
+                    value=True,
+                    key=f"select_{turn.thread_id}_{index}_{reminder_key}",
+                )
+                st.caption(reminder["message"])
+                if selected:
+                    selected_keys.append(reminder_key)
         cols = st.columns(2)
-        if cols[0].button("确认提醒", type="primary"):
-            st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "confirm"})
+        if cols[0].button("创建所选提醒", type="primary"):
+            st.session_state["graph_turn"] = agent.resume(
+                turn.thread_id,
+                {
+                    "action": "confirm",
+                    "selected_reminder_keys": selected_keys,
+                },
+            )
             st.rerun()
         if cols[1].button("跳过提醒"):
             st.session_state["graph_turn"] = agent.resume(turn.thread_id, {"action": "skip"})
             st.rerun()
         return
 
-    if not turn.record and not turn.reminder:
+    if not turn.record and not turn.reminders:
         return
     left, right = st.columns(2)
     with left:
@@ -157,7 +177,7 @@ def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
         st.json(turn.record or {})
     with right:
         st.subheader("提醒")
-        st.json(turn.reminder or {})
+        st.json(turn.reminders)
 
 
 def render_records(mcp_client: PersonalVaultMcpClient) -> None:
@@ -179,6 +199,14 @@ def render_records(mcp_client: PersonalVaultMcpClient) -> None:
             cols[3].write(record.get("deadline") or "无截止日")
             cols[4].write(f"v{record['version']}")
             st.caption(record["id"])
+            details = record.get("details") or {}
+            if record["record_type"] == "purchase":
+                st.caption(
+                    "退货截止："
+                    f"{details.get('return_deadline') or '-'} · "
+                    "保修截止："
+                    f"{details.get('warranty_deadline') or '-'}"
+                )
             status = st.selectbox(
                 "状态",
                 options=[item.value for item in RecordStatus],

@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
-from lifevault.models.schemas import LifeRecordCreate, RecordType, UserPreferencePatch
+from lifevault.models.schemas import (
+    LifeRecordCreate,
+    RecordType,
+    ReminderBatchCreate,
+    ReminderCreate,
+    ReminderType,
+    UserPreferencePatch,
+)
 from lifevault.storage.database import connect
 from lifevault.storage.repository import VaultRepository
 
@@ -54,6 +63,58 @@ class AuditRepositoryTest(unittest.TestCase):
                 )
 
             self.assertEqual(repo.get_preferences("local").default_time, "09:00")
+
+    def test_audit_failure_rolls_back_batch_reminders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "audit.db"
+            setup_repo = VaultRepository(database_path)
+            record = setup_repo.save_record(
+                "local",
+                LifeRecordCreate(record_type=RecordType.PURCHASE, title="批量回滚"),
+                "batch-rollback-record",
+            )
+            repo = FailingAuditRepository(database_path)
+            batch = ReminderBatchCreate(
+                reminders=[
+                    ReminderCreate(
+                        record_id=record.id,
+                        scheduled_at=datetime(
+                            2099,
+                            7,
+                            30,
+                            9,
+                            0,
+                            tzinfo=ZoneInfo("Asia/Shanghai"),
+                        ),
+                        reminder_type=ReminderType.RETURN_DEADLINE,
+                        message="不要提交",
+                    ),
+                    ReminderCreate(
+                        record_id=record.id,
+                        scheduled_at=datetime(
+                            2100,
+                            6,
+                            25,
+                            9,
+                            0,
+                            tzinfo=ZoneInfo("Asia/Shanghai"),
+                        ),
+                        reminder_type=ReminderType.WARRANTY_DEADLINE,
+                        message="也不要提交",
+                    ),
+                ],
+                idempotency_key="batch-rollback",
+            )
+
+            with self.assertRaises(RuntimeError):
+                repo.create_reminders("local", batch)
+
+            self.assertEqual(repo.list_reminders("local"), [])
+            with connect(database_path) as conn:
+                batch_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM reminder_batches"
+                ).fetchone()["count"]
+            self.assertEqual(batch_count, 0)
 
     def test_query_filters_user_scope_and_cursor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

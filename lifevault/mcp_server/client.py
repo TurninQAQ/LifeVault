@@ -54,6 +54,14 @@ class PersonalVaultMcpClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def create_reminders(
+        self,
+        reminders: list[dict[str, Any]],
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        ...
+
     def list_upcoming_subscriptions(
         self,
         days: int = 30,
@@ -167,6 +175,21 @@ class InProcessPersonalVaultMcpClient:
                 "user_confirmed": user_confirmed,
                 "message": message,
                 "parent_id": parent_id,
+            },
+        )
+
+    def create_reminders(
+        self,
+        reminders: list[dict[str, Any]],
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "create_reminders",
+            {
+                "reminders": reminders,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
             },
         )
 

@@ -11,6 +11,7 @@ from lifevault.models.schemas import (
     LifeRecordCreate,
     RecordStatus,
     RecordType,
+    ReminderBatchCreate,
     ReminderCreate,
     ReminderStatus,
     ReminderType,
@@ -347,6 +348,93 @@ def create_server(
                 params=audit_params,
             )
             return _fail("create_reminder_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Atomically create up to five reminders after user confirmation.")
+    def create_reminders(
+        reminders: list[dict[str, Any]],
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        raw_types = [
+            item.get("reminder_type")
+            for item in reminders
+            if isinstance(item, dict)
+            and item.get("reminder_type") in {reminder_type.value for reminder_type in ReminderType}
+        ]
+        raw_record_ids = {
+            item.get("record_id")
+            for item in reminders
+            if isinstance(item, dict) and isinstance(item.get("record_id"), str)
+        }
+        target_id = next(iter(raw_record_ids)) if len(raw_record_ids) == 1 else None
+        audit_params = {
+            "reminder_count": len(reminders),
+            "reminder_types": raw_types,
+        }
+        if not user_confirmed:
+            audit_mcp_failure(
+                "create_reminders",
+                "rejected",
+                "confirmation_required",
+                target_id=target_id,
+                params=audit_params,
+            )
+            return _fail("confirmation_required", "Creating reminders requires user_confirmed=true.")
+        if not idempotency_key:
+            audit_mcp_failure(
+                "create_reminders",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=target_id,
+                params=audit_params,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
+        try:
+            batch = ReminderBatchCreate.model_validate(
+                {
+                    "reminders": reminders,
+                    "idempotency_key": idempotency_key,
+                }
+            )
+        except ValidationError as exc:
+            audit_mcp_failure(
+                "create_reminders",
+                "rejected",
+                "invalid_reminders",
+                target_id=target_id,
+                params=audit_params,
+            )
+            return _fail("create_reminders_failed", str(exc))
+
+        audit_params = {
+            "reminder_count": len(batch.reminders),
+            "reminder_types": [reminder.reminder_type.value for reminder in batch.reminders],
+        }
+        try:
+            created = repo.create_reminders(user_id, batch, actor="mcp")
+            payload = [_model(reminder) for reminder in created]
+            return _ok(
+                reminders=payload,
+                reminder=payload[0] if payload else None,
+            )
+        except ValueError as exc:
+            audit_mcp_failure(
+                "create_reminders",
+                "failed",
+                "create_reminders_failed",
+                target_id=batch.record_id,
+                params=audit_params,
+            )
+            return _fail("create_reminders_failed", str(exc))
+        except Exception:
+            audit_mcp_failure(
+                "create_reminders",
+                "failed",
+                "internal_error",
+                target_id=batch.record_id,
+                params=audit_params,
+            )
+            return _fail("create_reminders_failed", "Tool execution failed.")
 
     @mcp.tool(description="List reminders by status.")
     def list_reminders(status: str | None = None, limit: int = 100) -> dict[str, Any]:

@@ -47,6 +47,21 @@ class FallbackExtractorTest(unittest.TestCase):
         self.assertEqual(parking_fee.title, "停车费")
         self.assertEqual(parking_fee.due_date_text, "今天")
 
+    def test_purchase_warranty_and_targeted_reminders(self) -> None:
+        candidate = self.extractor.extract_record(
+            "我 2026-07-25 买了一个相机，5000 元，七天退货，保修两年，"
+            "退货前 2 天、保修到期前 60 天提醒我，晚上 18:30 提醒。",
+            self.now,
+        )
+
+        self.assertEqual(candidate.return_days, 7)
+        self.assertEqual(candidate.warranty_months, 24)
+        self.assertTrue(candidate.return_reminder_requested)
+        self.assertTrue(candidate.warranty_reminder_requested)
+        self.assertEqual(candidate.return_remind_before_days, 2)
+        self.assertEqual(candidate.warranty_remind_before_days, 60)
+        self.assertEqual(candidate.reminder_time, "18:30")
+
     def test_purchase_merchant_and_title_with_spaces(self) -> None:
         apple = self.extractor.extract_record(
             "在 Apple Store 买了一个 iPad，3999 元，订单号 APPLE-IPAD-01，14 天可退。",

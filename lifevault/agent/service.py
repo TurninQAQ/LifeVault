@@ -26,6 +26,7 @@ from lifevault.models.schemas import (
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import (
+    calculate_calendar_month_deadline,
     calculate_deadline,
     calculate_next_renewal_date,
     calculate_reminder_at,
@@ -79,8 +80,18 @@ class LifeVaultAgent:
         preference = self._get_preferences()
         record = self._build_record(candidate, sanitized, now, preference)
         draft.record = record
+        if record.record_type == RecordType.PURCHASE:
+            _return_deadline, _warranty_deadline, deadline_warnings = self._purchase_deadlines(
+                candidate,
+                record.event_date,
+                now,
+            )
+            draft.warnings.extend(deadline_warnings)
         draft.duplicate_candidates = self.repository.find_duplicate(self.settings.default_user_id, record)
-        draft.reminder = self._build_reminder(candidate, record, preference)
+        reminders, reminder_warnings = self._build_reminders(candidate, record, preference, now)
+        draft.reminders = reminders
+        draft.reminder = reminders[0] if reminders else None
+        draft.warnings.extend(reminder_warnings)
         self.repository.save_checkpoint(draft.thread_id, draft.model_dump(mode="json"))
         return draft
 
@@ -111,28 +122,39 @@ class LifeVaultAgent:
             actor="agent",
         )
 
-        saved_reminder: Reminder | None = None
-        if draft.reminder:
+        saved_reminders: list[Reminder] = []
+        if draft.reminders:
             if not user_confirmed_reminder:
-                raise ConfirmationRequired("Creating a reminder requires user confirmation.")
-            reminder = draft.reminder.model_copy(update={"record_id": saved_record.id})
-            reminder_key = stable_key(
-                "reminder",
+                raise ConfirmationRequired("Creating reminders requires user confirmation.")
+            reminders = [
+                reminder.model_copy(update={"record_id": saved_record.id})
+                for reminder in draft.reminders
+            ]
+            batch_key = stable_key(
+                "reminder-batch",
                 self.settings.default_user_id,
                 saved_record.id,
-                reminder.reminder_type.value,
-                reminder.scheduled_at.isoformat(),
+                *[
+                    f"{reminder.reminder_type.value}:{reminder.scheduled_at.isoformat()}"
+                    for reminder in reminders
+                ],
             )
-            saved_reminder = self.repository.create_reminder(
-                self.settings.default_user_id,
-                reminder,
-                idempotency_key=reminder_key,
-                actor="agent",
+            create_result = self.mcp_client.create_reminders(
+                [reminder.model_dump(mode="json") for reminder in reminders],
+                idempotency_key=batch_key,
+                user_confirmed=True,
             )
+            if not create_result.get("ok"):
+                raise RuntimeError(_mcp_error_message("create_reminders", create_result))
+            saved_reminders = [
+                Reminder.model_validate(reminder)
+                for reminder in create_result.get("reminders", [])
+            ]
 
         return SaveResult(
             record=saved_record,
-            reminder=saved_reminder,
+            reminders=saved_reminders,
+            reminder=saved_reminders[0] if saved_reminders else None,
             duplicate_candidates=draft.duplicate_candidates,
         )
 
@@ -177,8 +199,17 @@ class LifeVaultAgent:
             )
             if not event_date:
                 missing.append("purchase_date")
-            if candidate.return_days is None and not candidate.deadline_date and not candidate.deadline_text:
-                missing.append("return_days_or_deadline")
+            return_deadline, warranty_deadline, _warnings = self._purchase_deadlines(
+                candidate,
+                event_date,
+                now,
+            )
+            if not return_deadline and not warranty_deadline:
+                missing.append("return_or_warranty_deadline")
+            if candidate.return_reminder_requested and not return_deadline:
+                missing.append("return_deadline")
+            if candidate.warranty_reminder_requested and not warranty_deadline:
+                missing.append("warranty_deadline")
         elif candidate.record_type == RecordType.SUBSCRIPTION:
             renewal, _source = self._subscription_renewal_date(candidate, now)
             if not renewal:
@@ -212,16 +243,20 @@ class LifeVaultAgent:
         details: dict[str, Any] = {}
 
         if candidate.record_type == RecordType.PURCHASE:
+            return_deadline, warranty_deadline, _warnings = self._purchase_deadlines(
+                candidate,
+                event_date,
+                now,
+            )
+            deadline = return_deadline or warranty_deadline
             details = {
                 "merchant": candidate.merchant,
                 "order_number": candidate.order_number,
                 "return_days": candidate.return_days,
                 "warranty_months": candidate.warranty_months,
+                "return_deadline": return_deadline.isoformat() if return_deadline else None,
+                "warranty_deadline": warranty_deadline.isoformat() if warranty_deadline else None,
             }
-            if not deadline and candidate.deadline_text:
-                deadline = parse_date_text(candidate.deadline_text, self.settings.default_timezone, now)
-            if not deadline and event_date and candidate.return_days is not None:
-                deadline = calculate_deadline(event_date, candidate.return_days)
         elif candidate.record_type == RecordType.SUBSCRIPTION:
             deadline, renewal_source = self._subscription_renewal_date(candidate, now)
             cycle = normalize_billing_cycle(candidate.billing_cycle)
@@ -264,36 +299,103 @@ class LifeVaultAgent:
             source_text_preview=sanitized_input[:240],
         )
 
+    def _build_reminders(
+        self,
+        candidate: ExtractedRecordCandidate,
+        record: LifeRecordCreate,
+        preference: UserPreference,
+        now: datetime,
+    ) -> tuple[list[ReminderCreate], list[str]]:
+        reminder_requested = (
+            candidate.reminder_requested
+            or candidate.return_reminder_requested
+            or candidate.warranty_reminder_requested
+        )
+        if not reminder_requested:
+            return [], []
+
+        reminder_time = candidate.reminder_time or preference.default_time
+        plans: list[tuple[ReminderType, date, int]] = []
+
+        if record.record_type == RecordType.PURCHASE:
+            has_specific_target = (
+                candidate.return_reminder_requested or candidate.warranty_reminder_requested
+            )
+            target_specs = [
+                (
+                    ReminderType.RETURN_DEADLINE,
+                    record.details.get("return_deadline"),
+                    candidate.return_reminder_requested,
+                    candidate.return_remind_before_days,
+                ),
+                (
+                    ReminderType.WARRANTY_DEADLINE,
+                    record.details.get("warranty_deadline"),
+                    candidate.warranty_reminder_requested,
+                    candidate.warranty_remind_before_days,
+                ),
+            ]
+            for reminder_type, deadline_text, specifically_requested, target_before_days in target_specs:
+                if not deadline_text or (has_specific_target and not specifically_requested):
+                    continue
+                before_days = target_before_days
+                if before_days is None:
+                    before_days = candidate.remind_before_days
+                if before_days is None:
+                    before_days = preference.default_advance_days
+                plans.append((reminder_type, date.fromisoformat(str(deadline_text)), before_days))
+        elif record.deadline:
+            before_days = candidate.remind_before_days
+            if before_days is None:
+                before_days = preference.default_advance_days
+            reminder_type = (
+                ReminderType.RENEWAL
+                if record.record_type == RecordType.SUBSCRIPTION
+                else ReminderType.BILL_DUE
+            )
+            plans.append((reminder_type, record.deadline, before_days))
+
+        reminders: list[ReminderCreate] = []
+        warnings: list[str] = []
+        for reminder_type, deadline, before_days in plans:
+            if deadline < now.date():
+                warnings.append(f"{reminder_type.value} deadline has already passed; reminder was not created.")
+                continue
+            scheduled_at = calculate_reminder_at(
+                deadline,
+                before_days,
+                reminder_time,
+                self.settings.default_timezone,
+            )
+            if scheduled_at <= now:
+                scheduled_at = now.replace(microsecond=0)
+                warnings.append(
+                    f"{reminder_type.value} advance time has passed; reminder will be scheduled immediately."
+                )
+            reminders.append(
+                ReminderCreate(
+                    record_id="__pending__",
+                    scheduled_at=scheduled_at,
+                    reminder_type=reminder_type,
+                    message=self._build_reminder_message(record, reminder_type, before_days),
+                )
+            )
+        return reminders, warnings
+
     def _build_reminder(
         self,
         candidate: ExtractedRecordCandidate,
         record: LifeRecordCreate,
         preference: UserPreference,
+        now: datetime | None = None,
     ) -> ReminderCreate | None:
-        if not record.deadline:
-            return None
-        before_days = candidate.remind_before_days
-        if before_days is None:
-            before_days = preference.default_advance_days
-        reminder_time = candidate.reminder_time or preference.default_time
-        scheduled_at = calculate_reminder_at(
-            record.deadline,
-            before_days,
-            reminder_time,
-            self.settings.default_timezone,
+        reminders, _warnings = self._build_reminders(
+            candidate,
+            record,
+            preference,
+            now or now_in_timezone(self.settings.default_timezone),
         )
-        reminder_type = {
-            RecordType.PURCHASE: ReminderType.RETURN_DEADLINE,
-            RecordType.SUBSCRIPTION: ReminderType.RENEWAL,
-            RecordType.BILL: ReminderType.BILL_DUE,
-        }[record.record_type]
-        message = self._build_reminder_message(record, before_days)
-        return ReminderCreate(
-            record_id="__pending__",
-            scheduled_at=scheduled_at,
-            reminder_type=reminder_type,
-            message=message,
-        )
+        return reminders[0] if reminders else None
 
     def _get_preferences(self) -> UserPreference:
         result = self.mcp_client.get_preferences()
@@ -304,12 +406,56 @@ class LifeVaultAgent:
         except (KeyError, TypeError, ValidationError) as exc:
             raise RuntimeError("MCP get_preferences returned an invalid response.") from exc
 
-    def _build_reminder_message(self, record: LifeRecordCreate, before_days: int) -> str:
-        if record.record_type == RecordType.PURCHASE:
+    def _build_reminder_message(
+        self,
+        record: LifeRecordCreate,
+        reminder_type: ReminderType,
+        before_days: int,
+    ) -> str:
+        if reminder_type == ReminderType.RETURN_DEADLINE:
             return f"你的「{record.title}」预计还有 {before_days} 天结束退货期。"
-        if record.record_type == RecordType.SUBSCRIPTION:
+        if reminder_type == ReminderType.WARRANTY_DEADLINE:
+            return f"你的「{record.title}」预计还有 {before_days} 天结束保修期。"
+        if reminder_type == ReminderType.RENEWAL:
             return f"你的「{record.title}」预计还有 {before_days} 天续费。"
         return f"你的「{record.title}」预计还有 {before_days} 天到缴费截止日。"
+
+    def _purchase_deadlines(
+        self,
+        candidate: ExtractedRecordCandidate,
+        event_date: date | None,
+        now: datetime,
+    ) -> tuple[date | None, date | None, list[str]]:
+        return_deadline = candidate.deadline_date
+        return_text = candidate.return_deadline_text or candidate.deadline_text
+        if return_deadline is None and return_text:
+            return_deadline = parse_date_text(return_text, self.settings.default_timezone, now)
+        if return_deadline is None and event_date and candidate.return_days is not None:
+            return_deadline = calculate_deadline(event_date, candidate.return_days)
+
+        explicit_warranty_deadline = parse_date_text(
+            candidate.warranty_deadline_text,
+            self.settings.default_timezone,
+            now,
+        )
+        calculated_warranty_deadline = None
+        if event_date and candidate.warranty_months is not None:
+            calculated_warranty_deadline = calculate_calendar_month_deadline(
+                event_date,
+                candidate.warranty_months,
+            )
+        warnings: list[str] = []
+        if (
+            explicit_warranty_deadline
+            and calculated_warranty_deadline
+            and explicit_warranty_deadline != calculated_warranty_deadline
+        ):
+            warnings.append(
+                "Explicit warranty deadline differs from the duration calculation; "
+                "the explicit deadline was used."
+            )
+        warranty_deadline = explicit_warranty_deadline or calculated_warranty_deadline
+        return return_deadline, warranty_deadline, warnings
 
     def _format_search_answer(self, records: list[LifeRecord]) -> str:
         if not records:

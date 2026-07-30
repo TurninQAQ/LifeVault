@@ -34,15 +34,38 @@ def parse_int(text: str | int | None) -> int | None:
     raw = str(text).strip()
     if raw.isdigit():
         return int(raw)
-    if raw in CN_NUMBERS:
+    return _parse_chinese_integer(raw)
+
+
+def _parse_chinese_integer(raw: str) -> int | None:
+    if not raw or any(character not in "零一二两三四五六七八九十百" for character in raw):
+        return None
+    if "百" in raw:
+        if raw.count("百") != 1:
+            return None
+        hundreds_text, remainder = raw.split("百", 1)
+        hundreds = 1 if not hundreds_text else CN_NUMBERS.get(hundreds_text)
+        if hundreds is None or not 1 <= hundreds <= 9:
+            return None
+        remainder = remainder.lstrip("零")
+        tail = _parse_chinese_under_hundred(remainder) if remainder else 0
+        return hundreds * 100 + tail if tail is not None else None
+    return _parse_chinese_under_hundred(raw)
+
+
+def _parse_chinese_under_hundred(raw: str) -> int | None:
+    if not raw:
+        return 0
+    if raw in CN_NUMBERS and raw != "十":
         return CN_NUMBERS[raw]
-    if len(raw) == 2 and raw[0] == "十" and raw[1] in CN_NUMBERS:
-        return 10 + CN_NUMBERS[raw[1]]
-    if len(raw) == 2 and raw[1] == "十" and raw[0] in CN_NUMBERS:
-        return CN_NUMBERS[raw[0]] * 10
-    if len(raw) == 3 and raw[1] == "十" and raw[0] in CN_NUMBERS and raw[2] in CN_NUMBERS:
-        return CN_NUMBERS[raw[0]] * 10 + CN_NUMBERS[raw[2]]
-    return None
+    if "十" not in raw or raw.count("十") != 1:
+        return None
+    tens_text, ones_text = raw.split("十", 1)
+    tens = 1 if not tens_text else CN_NUMBERS.get(tens_text)
+    ones = 0 if not ones_text else CN_NUMBERS.get(ones_text)
+    if tens is None or ones is None or not 1 <= tens <= 9 or not 0 <= ones <= 9:
+        return None
+    return tens * 10 + ones
 
 
 def parse_date_text(text: str | None, timezone_name: str, now: datetime | None = None) -> date | None:
@@ -89,12 +112,12 @@ def parse_date_text(text: str | None, timezone_name: str, now: datetime | None =
     if raw in relative_days:
         return today + timedelta(days=relative_days[raw])
 
-    match = re.search(r"([一二两三四五六七八九十\d]+)\s*天前", raw)
+    match = re.search(r"([零一二两三四五六七八九十百\d]+)\s*天前", raw)
     if match:
         days = parse_int(match.group(1))
         return today - timedelta(days=days) if days is not None else None
 
-    match = re.search(r"([一二两三四五六七八九十\d]+)\s*天后", raw)
+    match = re.search(r"([零一二两三四五六七八九十百\d]+)\s*天后", raw)
     if match:
         days = parse_int(match.group(1))
         return today + timedelta(days=days) if days is not None else None
@@ -171,6 +194,12 @@ def calculate_deadline(event_date: date, days: int) -> date:
     if days < 0:
         raise ValueError("days must be non-negative")
     return event_date + timedelta(days=days)
+
+
+def calculate_calendar_month_deadline(event_date: date, months: int) -> date:
+    if months <= 0:
+        raise ValueError("months must be positive")
+    return _add_months(event_date, months, day=event_date.day)
 
 
 def calculate_reminder_at(

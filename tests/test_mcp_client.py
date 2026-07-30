@@ -168,6 +168,122 @@ class McpClientTest(unittest.TestCase):
             self.assertEqual(len(upcoming["records"]), 1)
             self.assertEqual(upcoming["records"][0]["title"], "MCP Client 会员")
 
+    def test_batch_reminders_are_atomic_scoped_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(database_path=Path(tmp) / "mcp-client.db", use_qwen=False)
+            repo = VaultRepository(settings.database_path)
+            client = InProcessPersonalVaultMcpClient(settings, repo)
+            first_record = client.save_record(
+                {
+                    "record_type": "purchase",
+                    "title": "批量提醒商品",
+                    "amount": 100,
+                    "event_date": "2099-07-25",
+                    "deadline": "2099-08-01",
+                },
+                "batch-record-1",
+                user_confirmed=True,
+            )["record"]
+            second_record = client.save_record(
+                {
+                    "record_type": "purchase",
+                    "title": "另一件商品",
+                    "amount": 200,
+                    "event_date": "2099-07-25",
+                    "deadline": "2099-08-01",
+                },
+                "batch-record-2",
+                user_confirmed=True,
+            )["record"]
+            reminders = [
+                {
+                    "record_id": first_record["id"],
+                    "scheduled_at": "2099-07-30T09:00:00+08:00",
+                    "reminder_type": "return_deadline",
+                    "message": "退货提醒",
+                },
+                {
+                    "record_id": first_record["id"],
+                    "scheduled_at": "2100-06-25T09:00:00+08:00",
+                    "reminder_type": "warranty_deadline",
+                    "message": "保修提醒",
+                },
+            ]
+
+            rejected = client.create_reminders(
+                reminders,
+                idempotency_key="batch-reminders-rejected",
+                user_confirmed=False,
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(repo.list_reminders("local"), [])
+
+            created = client.create_reminders(
+                reminders,
+                idempotency_key="batch-reminders",
+                user_confirmed=True,
+            )
+            repeated = client.create_reminders(
+                reminders,
+                idempotency_key="batch-reminders",
+                user_confirmed=True,
+            )
+            self.assertTrue(created["ok"])
+            self.assertEqual(
+                [item["id"] for item in created["reminders"]],
+                [item["id"] for item in repeated["reminders"]],
+            )
+            self.assertEqual(len(repo.list_reminders("local")), 2)
+
+            reused_key = client.create_reminders(
+                [
+                    {
+                        **reminders[0],
+                        "scheduled_at": "2099-07-29T09:00:00+08:00",
+                    }
+                ],
+                idempotency_key="batch-reminders",
+                user_confirmed=True,
+            )
+            self.assertFalse(reused_key["ok"])
+            self.assertEqual(len(repo.list_reminders("local")), 2)
+
+            cross_record = client.create_reminders(
+                [
+                    reminders[0],
+                    {
+                        **reminders[1],
+                        "record_id": second_record["id"],
+                    },
+                ],
+                idempotency_key="batch-cross-record",
+                user_confirmed=True,
+            )
+            self.assertFalse(cross_record["ok"])
+            self.assertEqual(len(repo.list_reminders("local")), 2)
+
+            too_many = client.create_reminders(
+                [
+                    {
+                        "record_id": first_record["id"],
+                        "scheduled_at": f"2101-01-0{index + 1}T09:00:00+08:00",
+                        "reminder_type": "custom",
+                        "message": f"提醒 {index}",
+                    }
+                    for index in range(6)
+                ],
+                idempotency_key="batch-too-many",
+                user_confirmed=True,
+            )
+            self.assertFalse(too_many["ok"])
+            self.assertEqual(len(repo.list_reminders("local")), 2)
+
+            audit = client.list_audit_logs(action="create_reminders")
+            successes = [log for log in audit["audit_logs"] if log["result"] == "ok"]
+            self.assertEqual(len(successes), 1)
+            self.assertIn('"reminder_count": 2', successes[0]["params_summary"])
+            self.assertNotIn("退货提醒", successes[0]["params_summary"])
+
     def test_preferences_require_confirmation_and_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(database_path=Path(tmp) / "mcp-client.db", use_qwen=False)
