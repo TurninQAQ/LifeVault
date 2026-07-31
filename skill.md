@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.16 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v0.17 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.16 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v0.17 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -20,6 +20,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - Reminder Worker 在后台扫描并发送桌面通知。
 - 已保存记录可以通过 MCP 预览并原子更新，同时重排受影响提醒。
 - 已保存记录可以通过独立 LangGraph 自然语言修改，但必须由用户选择目标并确认补丁。
+- 已保存记录可以归档和恢复；归档会取消活动提醒，但不会混用业务状态或物理删除数据。
 
 核心设计原则：
 
@@ -69,6 +70,15 @@ Worker 负责长期任务
   -> MCP 只读预览
   -> 用户结构化纠正和确认
   -> MCP 原子提交
+
+归档或恢复已保存记录
+  -> 提取明确生命周期意图
+  -> MCP 按 active/archived 范围搜索
+  -> 用户明确选择目标记录
+  -> MCP 只读生命周期预览
+  -> 用户确认
+  -> 归档：记录版本、提醒取消、审计、幂等结果原子提交
+  -> 恢复：清除 archived_at，但不自动重建提醒
 ```
 
 主要代码入口：
@@ -108,6 +118,7 @@ Worker 负责长期任务
 | v0.14 | `bbb7ec2` | 保存前校对 | 用户可修改候选并重新计算 |
 | v0.15 | `8cf4704` | 保存后编辑 | 原子更新记录并重排已有提醒 |
 | v0.16 | `e9cace7` | 自然语言更新 | 选目标、预览、纠正、确认后原子修改 |
+| v0.17 | `af6ef69` | 记录归档与恢复 | 可恢复删除、提醒一致性和归档查询范围 |
 
 ---
 
@@ -862,9 +873,52 @@ sanitized input
 
 ---
 
-## 20. 当前测试体系
+## 20. v0.17：可恢复的记录归档与恢复
 
-当前共有 124 个测试，主要分层如下：
+**目标**
+
+允许用户整理不再活跃的记录，并把自然语言“删除这条记录”实现为可恢复归档，而不是立即物理删除。整个功能继续遵守 MCP、确认、乐观锁、幂等、审计和提醒一致性边界。
+
+**数据模型与事务**
+
+- `life_records` 新增独立 `archived_at`，不把归档塞入 `status`。归档和恢复都保留标题、金额、详情和原业务状态。
+- `search_records` 新增 `archive_scope=active|archived|all`，默认只返回当前记录；按 ID 的 `get_record` 仍可读取归档记录。
+- 新增 `record_lifecycle_operations` 保存操作类型、请求哈希和首次结果。完全相同的重试返回原结果，冲突复用幂等键会被拒绝。
+- 归档事务重新读取记录和提醒：任何相关提醒处于 `sending` 时返回 `reminder_in_flight`；否则记录版本更新、全部 `pending/snoozed` 提醒取消、审计和幂等结果同事务提交。
+- 恢复只清除 `archived_at` 并更新版本、时间、审计和幂等结果，不猜测也不重建曾取消的提醒。
+- 重复归档或恢复返回 `no_changes`，不增加版本、不写审计、不新增幂等行。
+- 归档记录的内容和状态更新在 Repository 服务端统一返回 `record_archived`，不能只靠 UI 隐藏按钮。
+
+**MCP 与 Graph**
+
+- MCP 新增 `preview_record_archive`、`archive_record`、`preview_record_restore`、`restore_record`。写工具要求 `user_confirmed`、`expected_version` 和 `idempotency_key`。
+- `RecordUpdateGraphAgent` 复用现有选目标、预览、确认和版本冲突流程；归档搜索 active，恢复搜索 archived。
+- 生命周期意图选定后直接进入预览，不执行第二次 Patch Qwen 调用，因为归档/恢复没有内容补丁。
+- “删除订单号”仍是字段清空；“删除 ChatGPT Plus 记录”是归档；“恢复归档记录/取消归档/找回删除记录”才是恢复。
+- “恢复 ChatGPT Plus”和“删除它”被确定性规则标记为歧义。即使 Qwen 猜出操作，Graph 也要求用户补充明确指令。
+- 用户只说“归档这条记录”时，Graph 会在补充目标名称后保留已经明确的归档意图。
+
+**Worker、入口与评测**
+
+- Worker 不发送归档记录的遗留提醒，也不推进归档订阅；Repository 查询和滚动事务都检查 `archived_at`，覆盖查询后发生归档的竞态。
+- 重复检测包含归档记录，并在候选中返回 `archived=true`，但创建流程不会擅自跳转恢复。
+- Streamlit“我的记录”分当前/归档视图，当前记录可预览归档，归档记录可预览恢复；归档视图不提供内容编辑和状态修改。
+- CLI 新增 `archive RECORD_ID VERSION`、`restore RECORD_ID VERSION`，支持 `--dry-run` 和 `--yes`；`list` 支持 `--archive-scope`。
+- `sample_data/update_examples.jsonl` 从 24 条扩到 36 条。fallback 和本地 Qwen 均为 36/36 case、87/87 field。
+
+**学习重点**
+
+- 归档是记录生命周期，业务状态是领域事实，两者必须正交。
+- “软删除”不只是增加一列，还要定义查询默认值、提醒行为、重复检测、编辑限制、审计和恢复语义。
+- 删除意图属于高风险语义，确定性歧义规则应覆盖模型的自信猜测。
+- 恢复不自动重建提醒是保守策略；系统缺少原始用户意图时，不应创造新的长期副作用。
+- 预览绑定版本，版本冲突后旧确认失效，这与内容更新遵守同一并发原则。
+
+---
+
+## 21. 当前测试体系
+
+当前共有 132 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
@@ -881,11 +935,12 @@ sanitized input
 | `test_repository.py` | SQLite 事务、查询和乐观锁 |
 | `test_record_updates.py` | Patch、提醒重排、幂等、冲突和旧表迁移 |
 | `test_status_updates.py` | 状态白名单、提醒取消、幂等和事务回滚 |
+| `test_record_lifecycle.py` | 归档/恢复事务、查询范围、幂等、回滚、MCP 和 Worker 防线 |
 | `test_update_graph_agent.py` | 自然更新选目标、冻结、纠正、恢复和版本冲突 |
 | `test_audit.py` | 审计事务和隐私允许列表 |
 | `test_worker.py` | 通知、免打扰、失败和周期推进 |
-| `test_app.py` | Streamlit 校对、提醒选择和已保存记录编辑 |
-| `test_cli.py` | CLI 结构化校对与局部记录更新 |
+| `test_app.py` | Streamlit 校对、提醒选择、记录编辑和归档/恢复视图 |
+| `test_cli.py` | CLI 结构化校对、局部更新和归档/恢复命令 |
 
 常用验证命令：
 
@@ -905,7 +960,7 @@ python3 -m py_compile \
 git diff --check
 ```
 
-## 21. 推荐学习顺序
+## 22. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -946,6 +1001,7 @@ git diff --check
 5. 对比 Repository 方法和 MCP Tool 的职责。
 6. 跟踪一次 `preview_record_update` 到 `update_record` 的提交过程。
 7. 对比 `preview_record_status_update` 和 `update_record_status` 的事务职责。
+8. 跟踪 `preview_record_archive` 到 `archive_record`，再对比 `restore_record` 为什么不重建提醒。
 
 目标：理解 MCP 不是数据库 ORM，而是受控能力边界。
 
@@ -958,7 +1014,7 @@ git diff --check
 
 目标：理解 Agent 对话结束后，长期任务如何继续可靠运行。
 
-## 22. 用 Git 学习每次迭代
+## 23. 用 Git 学习每次迭代
 
 查看自然语言更新版本的完整实现提交：
 
@@ -1009,13 +1065,14 @@ d0cf075  v0.13 多提醒
 bbb7ec2  v0.14 校对闭环
 8cf4704  v0.15 保存后编辑
 e9cace7  v0.16 自然语言更新
+af6ef69  v0.17 记录归档与恢复
 ```
 
-## 23. 尚未实现的能力
+## 24. 尚未实现的能力
 
 当前明确未实现：
 
-- 已保存记录的类型转换和删除。
+- 已保存记录的类型转换、物理删除、保留期和自动清理。
 - OCR、截图和 PDF 导入。
 - 邮件、微信和云端推送。
 - 云同步和多用户权限。

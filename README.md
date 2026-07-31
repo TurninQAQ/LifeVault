@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.16 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.17 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 
@@ -19,6 +19,9 @@ saved record -> MCP update preview -> user confirmation
 natural update -> target extraction -> MCP search -> explicit target selection
 -> typed patch extraction -> deterministic date freeze -> MCP preview
 -> user correction/confirmation -> atomic MCP update
+
+archive/restore intent -> active/archived MCP search -> explicit selection
+-> lifecycle preview -> user confirmation -> atomic archive or restore
 ```
 
 The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
@@ -134,6 +137,17 @@ v0.16 adds controlled natural-language updates for persisted records:
 - Streamlit supports natural edits globally and from an individual record. CLI adds `edit`, `edit-resume`, and `edit-state`; the existing `status` command now previews before writing.
 - `sample_data/update_examples.jsonl` and `eval-updates` evaluate the target and patch stages. Both fallback and the configured local Qwen pass 24/24 included cases and 54/54 expected fields.
 
+v0.17 adds recoverable record archive and restore:
+
+- Records use an independent nullable `archived_at` lifecycle field; business `status` and record content are preserved.
+- Archiving atomically increments the record version, cancels every pending/snoozed reminder, writes a privacy-filtered audit event, and stores an idempotent result. A sending reminder blocks the whole transaction.
+- Restoring clears `archived_at` and increments the version, but deliberately does not recreate reminders cancelled during archive.
+- MCP adds `preview_record_archive`, `archive_record`, `preview_record_restore`, and `restore_record`. Collection searches accept `archive_scope=active|archived|all` and default to active records; `get_record` still returns archived records by ID.
+- Natural “delete this record” means recoverable archive. Field deletion remains a typed clear, while ambiguous phrases such as `恢复 ChatGPT Plus` and `删除它` require clarification. Lifecycle operations skip the second patch-extraction model call.
+- Archived records cannot be edited or have their status changed until restored. Duplicate review still finds archived candidates and labels them as archived.
+- Worker delivery and subscription rollover exclude archived records. Streamlit adds current/archived record views with preview-confirm actions; CLI adds `archive` and `restore` commands with `--dry-run` and `--yes`.
+- The natural-update evaluation now contains 36 cases. Both fallback and the configured local Qwen pass 36/36 cases and 87/87 expected fields.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -200,6 +214,10 @@ python -m lifevault.cli edit "把 ChatGPT Plus 的月费改成 25 美元"
 python -m lifevault.cli edit "下次续费日改到下个月 20 号" --record-id RECORD_ID --yes
 python -m lifevault.cli status RECORD_ID cancelled VERSION --dry-run
 python -m lifevault.cli status RECORD_ID cancelled VERSION --yes
+python -m lifevault.cli archive RECORD_ID VERSION --dry-run
+python -m lifevault.cli archive RECORD_ID VERSION --yes
+python -m lifevault.cli list --archive-scope archived
+python -m lifevault.cli restore RECORD_ID VERSION --yes
 python -m lifevault.cli worker --once
 python -m lifevault.cli eval
 python -m lifevault.cli eval --json-out eval_report.json
@@ -255,6 +273,10 @@ preview_record_status_update
 get_preferences
 find_duplicate
 update_record_status
+preview_record_archive
+archive_record
+preview_record_restore
+restore_record
 update_preferences
 create_reminder
 create_reminders
@@ -264,7 +286,7 @@ cancel_reminder
 list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `update_record`, `update_record_status`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. Record and status updates also require `expected_version` and `idempotency_key`; possible duplicate content edits require `duplicate_confirmed=true`. The Graph agents use an in-process `PersonalVaultMcpClient`; models only produce candidates and never call write tools or construct authority fields. The CLI and Streamlit use the same MCP client for vault access, while the stdio MCP server remains available for external clients and integration smoke tests.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `update_record`, `update_record_status`, `archive_record`, `restore_record`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. Record, status, and lifecycle updates also require `expected_version` and `idempotency_key`; possible duplicate content edits require `duplicate_confirmed=true`. The Graph agents use an in-process `PersonalVaultMcpClient`; models only produce candidates and never call write tools or construct authority fields. The CLI and Streamlit use the same MCP client for vault access, while the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 
@@ -272,7 +294,7 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 python3 -m streamlit run lifevault/app/main.py
 ```
 
-Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports typed and natural-language saved-record editing plus two-phase status changes, all with MCP-computed previews before confirmation.
+Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports current/archived views, typed and natural-language saved-record editing, two-phase status changes, and preview-confirm archive/restore actions.
 
 ## Tests
 
