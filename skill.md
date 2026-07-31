@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.14 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v0.15 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.14 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v0.15 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -18,6 +18,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - MCP Server 作为个人数据和副作用的统一边界。
 - SQLite 保存记录、提醒、偏好、检查点和审计日志。
 - Reminder Worker 在后台扫描并发送桌面通知。
+- 已保存记录可以通过 MCP 预览并原子更新，同时重排受影响提醒。
 
 核心设计原则：
 
@@ -50,6 +51,13 @@ Worker 负责长期任务
   -> Worker 扫描
   -> 桌面通知 / 控制台回退
   -> 脱敏审计
+
+已保存记录
+  -> MCP 读取
+  -> 类型化局部补丁
+  -> 更新与提醒影响预览
+  -> 用户确认
+  -> 乐观锁、记录更新、提醒重排、审计和幂等结果原子提交
 ```
 
 主要代码入口：
@@ -61,6 +69,7 @@ Worker 负责长期任务
 - [`lifevault/agent/graph_agent.py`](lifevault/agent/graph_agent.py)：LangGraph 工作流。
 - [`lifevault/mcp_server/server.py`](lifevault/mcp_server/server.py)：MCP 工具边界。
 - [`lifevault/storage/repository.py`](lifevault/storage/repository.py)：SQLite 事务和查询。
+- [`lifevault/records/update_planner.py`](lifevault/records/update_planner.py)：已保存记录更新和提醒重排计划。
 - [`lifevault/worker/reminder_worker.py`](lifevault/worker/reminder_worker.py)：后台提醒执行。
 - [`lifevault/app/main.py`](lifevault/app/main.py)：Streamlit 界面。
 - [`lifevault/cli.py`](lifevault/cli.py)：CLI 与调试入口。
@@ -83,6 +92,7 @@ Worker 负责长期任务
 | v0.12 | `bf2584c` | 周期续费提醒 | Worker 自动推进下一周期 |
 | v0.13 | `d0cf075` | 商品多提醒 | 退货和保修提醒原子批量创建 |
 | v0.14 | `bbb7ec2` | 保存前校对 | 用户可修改候选并重新计算 |
+| v0.15 | `8cf4704` | 保存后编辑 | 原子更新记录并重排已有提醒 |
 
 ---
 
@@ -661,9 +671,104 @@ error_code
 
 ---
 
-## 18. 当前测试体系
+## 18. v0.15：已保存记录编辑与提醒重排
 
-当前共有 97 个测试，主要分层如下：
+**目标**
+
+解决记录保存后只能改状态、不能修正金额、日期和业务字段的问题，同时避免记录日期已经修改、提醒仍停留在旧时间。
+
+**实现内容**
+
+- 新增严格的 `RecordUpdatePatch`：
+  - 未提交字段保持不变。
+  - 显式 `null` 清空可选字段。
+  - 标题、金额和币种不能清空。
+  - 按 purchase、subscription、bill 限制字段白名单。
+  - `record_type`、ID、用户、来源和时间元数据不可修改。
+- 新增纯确定性 `update_planner.py`：
+  - 合并当前记录和补丁。
+  - 计算实际变化字段。
+  - 校验日期关系。
+  - 判断受影响提醒。
+  - 生成取消和替代提醒计划。
+- MCP 新增：
+  - `preview_record_update`
+  - `update_record`
+- 预览只读，返回：
+  - 更新后的记录。
+  - 变化字段。
+  - 将取消和创建的提醒。
+  - 警告。
+  - 疑似重复记录。
+- 提交强制要求：
+  - `user_confirmed=true`
+  - `expected_version`
+  - `idempotency_key`
+  - 必要时 `duplicate_confirmed=true`
+- 相同幂等键和相同请求返回第一次结果；同一键不同请求返回 `idempotency_conflict`。
+- 版本冲突返回 `version_conflict` 和最新记录。
+- 受影响提醒处于 `sending` 时返回 `reminder_in_flight`，避免旧提醒发送过程中改计划。
+- 记录写入、旧提醒取消、替代提醒创建、脱敏审计和幂等结果写入同一 SQLite 事务。
+- 旧提醒通过 `parent_id` 连接替代提醒，保留历史链。
+- 已发送、失败和已取消提醒不修改。
+- 历史记录仍可修正，但是否创建替代提醒遵守原有状态规则。
+- 旧提醒表自动迁移为“仅活动提醒时段唯一”，允许只改标题时在同一时刻创建替代提醒。
+- Streamlit 的“我的记录”提供类型化编辑、影响预览、重复确认和最终提交。
+- CLI 新增 `update`，支持 `--changes-json`、`--dry-run`、`--yes` 和 `--confirm-duplicate`。
+- stdio MCP 冒烟测试真实覆盖预览、拒绝未确认更新、成功提交和幂等重放。
+
+**更新数据流**
+
+```text
+record_id + expected_version + changes
+-> preview_record_update
+   -> 读取当前记录和提醒
+   -> 严格 Patch 校验
+   -> 计算 proposed record
+   -> 计算提醒取消/替代计划
+   -> 排除自身后重新查重
+-> 用户查看预览并确认
+-> update_record
+   -> BEGIN IMMEDIATE
+   -> 检查幂等结果
+   -> 重新检查版本
+   -> 重新计算完整计划
+   -> 更新记录
+   -> 取消旧提醒并创建替代提醒
+   -> 写脱敏审计
+   -> 保存幂等结果
+   -> COMMIT
+```
+
+**为什么提交时必须重新计算**
+
+预览和确认之间，Worker 或另一个页面可能修改记录或提醒。`update_record` 不能直接执行客户端传回的预览，而要在拿到写锁后重新读取权威状态并计算计划。`expected_version` 防止覆盖记录变化，`reminder_in_flight` 防止覆盖正在发送的提醒。
+
+**为什么更新需要独立幂等表**
+
+仅靠乐观锁无法区分“第一次提交失败”和“第一次已成功但响应丢失”。`record_update_operations` 保存请求哈希和第一次结果，使完全相同的网络重试得到原结果，而不是模糊的版本冲突。
+
+**为什么修改提醒唯一约束**
+
+旧表对 `(record_id, reminder_type, scheduled_at)` 做全历史唯一。只修改标题时，旧提醒要取消，替代提醒仍使用同一时刻，全历史唯一会阻止新提醒插入。v0.15 保留全部历史行，但只约束 `pending` 和 `sending` 活动提醒不能占用相同时段。
+
+**为什么不让大模型直接编辑已保存记录**
+
+持久化修改比草稿提取风险更高。v0.15 先建立结构化 Patch、预览、确认、乐观锁、幂等和审计链路。自然语言修改后续只能作为 Patch 候选生成器，不能绕过这条确定性写入边界。
+
+**学习重点**
+
+- 预览是用户体验，事务内重新计算才是正确性保证。
+- Patch 的“未提交”和“显式清空”必须依赖 `model_fields_set` 区分。
+- 幂等、乐观锁和用户确认解决的是三个不同问题，不能互相替代。
+- 修改主记录时必须把关联提醒视为同一个一致性边界。
+- 数据库唯一约束也要表达生命周期语义，不能只表达字段组合。
+
+---
+
+## 19. 当前测试体系
+
+当前共有 109 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
@@ -677,10 +782,11 @@ error_code
 | `test_mcp_server.py` | 真实 stdio MCP 冒烟 |
 | `test_mcp_boundary.py` | Agent/UI/CLI 不绕过 MCP |
 | `test_repository.py` | SQLite 事务、查询和乐观锁 |
+| `test_record_updates.py` | Patch、提醒重排、幂等、冲突和旧表迁移 |
 | `test_audit.py` | 审计事务和隐私允许列表 |
 | `test_worker.py` | 通知、免打扰、失败和周期推进 |
-| `test_app.py` | Streamlit 校对和提醒选择 |
-| `test_cli.py` | CLI 结构化校对 |
+| `test_app.py` | Streamlit 校对、提醒选择和已保存记录编辑 |
+| `test_cli.py` | CLI 结构化校对与局部记录更新 |
 
 常用验证命令：
 
@@ -691,11 +797,13 @@ python3 -m lifevault.cli mcp-smoke
 python3 -m py_compile \
   lifevault/models/schemas.py \
   lifevault/agent/service.py \
-  lifevault/agent/graph_agent.py
+  lifevault/agent/graph_agent.py \
+  lifevault/records/update_planner.py \
+  lifevault/storage/repository.py
 git diff --check
 ```
 
-## 19. 推荐学习顺序
+## 20. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -732,6 +840,7 @@ git diff --check
 3. 运行 `mcp-smoke`。
 4. 阅读 `test_mcp_boundary.py`。
 5. 对比 Repository 方法和 MCP Tool 的职责。
+6. 跟踪一次 `preview_record_update` 到 `update_record` 的提交过程。
 
 目标：理解 MCP 不是数据库 ORM，而是受控能力边界。
 
@@ -744,18 +853,18 @@ git diff --check
 
 目标：理解 Agent 对话结束后，长期任务如何继续可靠运行。
 
-## 20. 用 Git 学习每次迭代
+## 21. 用 Git 学习每次迭代
 
 查看某一版完整提交：
 
 ```bash
-git show bbb7ec2
+git show 8cf4704
 ```
 
 查看两个版本之间的变化：
 
 ```bash
-git diff d0cf075..bbb7ec2
+git diff bbb7ec2..8cf4704
 ```
 
 只看某个文件的演进：
@@ -793,19 +902,20 @@ b6c0b5a  v0.10 Audit
 bf2584c  v0.12 周期提醒
 d0cf075  v0.13 多提醒
 bbb7ec2  v0.14 校对闭环
+8cf4704  v0.15 保存后编辑
 ```
 
-## 21. 尚未实现的能力
+## 22. 尚未实现的能力
 
 当前明确未实现：
 
-- 已保存记录的完整字段编辑。
+- 已保存记录的类型转换和删除。
+- 通过自然语言直接修改已保存记录。
 - OCR、截图和 PDF 导入。
 - 邮件、微信和云端推送。
 - 云同步和多用户权限。
 - 自动付款、退款或取消订阅。
 - 草稿版本历史与撤销。
-- 保存后自动重排已有提醒。
 
 后续版本仍应保持当前迭代方式：
 
