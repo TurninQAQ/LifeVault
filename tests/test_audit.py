@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from lifevault.models.schemas import (
     LifeRecordCreate,
     RecordType,
+    RecordUpdatePatch,
     ReminderBatchCreate,
     ReminderCreate,
     ReminderType,
@@ -115,6 +116,72 @@ class AuditRepositoryTest(unittest.TestCase):
                     "SELECT COUNT(*) AS count FROM reminder_batches"
                 ).fetchone()["count"]
             self.assertEqual(batch_count, 0)
+
+    def test_audit_failure_rolls_back_record_and_reminder_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "audit.db"
+            setup_repo = VaultRepository(database_path)
+            record = setup_repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type=RecordType.PURCHASE,
+                    title="更新回滚",
+                    event_date=date(2099, 7, 25),
+                    deadline=date(2099, 8, 1),
+                    details={"return_deadline": "2099-08-01"},
+                ),
+                "update-rollback-record",
+            )
+            reminder = setup_repo.create_reminder(
+                "local",
+                ReminderCreate(
+                    record_id=record.id,
+                    scheduled_at=datetime(
+                        2099,
+                        7,
+                        30,
+                        9,
+                        0,
+                        tzinfo=ZoneInfo("Asia/Shanghai"),
+                    ),
+                    reminder_type=ReminderType.RETURN_DEADLINE,
+                    message="更新回滚提醒",
+                ),
+                "update-rollback-reminder",
+            )
+            repo = FailingAuditRepository(database_path)
+
+            with self.assertRaises(RuntimeError):
+                repo.update_record(
+                    "local",
+                    record.id,
+                    RecordUpdatePatch(return_deadline=date(2099, 8, 8)),
+                    expected_version=1,
+                    timezone_name="Asia/Shanghai",
+                    now=datetime(
+                        2026,
+                        7,
+                        31,
+                        10,
+                        0,
+                        tzinfo=ZoneInfo("Asia/Shanghai"),
+                    ),
+                    idempotency_key="update-rollback",
+                    duplicate_confirmed=False,
+                )
+
+            persisted = setup_repo.get_record("local", record.id)
+            self.assertEqual(persisted.version, 1)
+            self.assertEqual(persisted.deadline, date(2099, 8, 1))
+            self.assertEqual(
+                setup_repo.get_reminder("local", reminder.id).status.value,
+                "pending",
+            )
+            with connect(database_path) as conn:
+                operation_count = conn.execute(
+                    "SELECT COUNT(*) AS count FROM record_update_operations"
+                ).fetchone()["count"]
+            self.assertEqual(operation_count, 0)
 
     def test_query_filters_user_scope_and_cursor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

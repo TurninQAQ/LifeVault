@@ -30,6 +30,25 @@ class PersonalVaultMcpClient(Protocol):
     def get_record(self, record_id: str) -> dict[str, Any]:
         ...
 
+    def preview_record_update(
+        self,
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+    ) -> dict[str, Any]:
+        ...
+
+    def update_record(
+        self,
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+        duplicate_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
     def get_preferences(self) -> dict[str, Any]:
         ...
 
@@ -134,6 +153,42 @@ class InProcessPersonalVaultMcpClient:
 
     def get_record(self, record_id: str) -> dict[str, Any]:
         return self.call_tool("get_record", {"record_id": record_id})
+
+    def preview_record_update(
+        self,
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "preview_record_update",
+            {
+                "record_id": record_id,
+                "changes": changes,
+                "expected_version": expected_version,
+            },
+        )
+
+    def update_record(
+        self,
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+        duplicate_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "update_record",
+            {
+                "record_id": record_id,
+                "changes": changes,
+                "expected_version": expected_version,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
+                "duplicate_confirmed": duplicate_confirmed,
+            },
+        )
 
     def get_preferences(self) -> dict[str, Any]:
         return self.call_tool("get_preferences", {})

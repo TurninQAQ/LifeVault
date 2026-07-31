@@ -45,12 +45,14 @@ CREATE TABLE IF NOT EXISTS reminders (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     sent_at TEXT,
-    UNIQUE(user_id, idempotency_key),
-    UNIQUE(record_id, reminder_type, scheduled_at)
+    UNIQUE(user_id, idempotency_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(user_id, status, scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_record ON reminders(record_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_active_slot
+ON reminders(record_id, reminder_type, scheduled_at)
+WHERE status IN ('pending', 'sending');
 
 CREATE TABLE IF NOT EXISTS reminder_batches (
     user_id TEXT NOT NULL,
@@ -60,6 +62,19 @@ CREATE TABLE IF NOT EXISTS reminder_batches (
     created_at TEXT NOT NULL,
     PRIMARY KEY(user_id, idempotency_key)
 );
+
+CREATE TABLE IF NOT EXISTS record_update_operations (
+    user_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    record_id TEXT NOT NULL REFERENCES life_records(id),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_record_update_operations_record
+ON record_update_operations(user_id, record_id);
 
 CREATE TABLE IF NOT EXISTS user_preferences (
     user_id TEXT PRIMARY KEY,
@@ -87,6 +102,49 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 """
 
+REMINDER_SLOT_MIGRATION = """
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+
+ALTER TABLE reminders RENAME TO reminders_with_global_slot;
+
+CREATE TABLE reminders (
+    id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL REFERENCES life_records(id),
+    user_id TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    reminder_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL,
+    parent_id TEXT REFERENCES reminders(id),
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE(user_id, idempotency_key)
+);
+
+INSERT INTO reminders(
+    id, record_id, user_id, scheduled_at, reminder_type, message, status,
+    parent_id, idempotency_key, created_at, updated_at, sent_at
+)
+SELECT
+    id, record_id, user_id, scheduled_at, reminder_type, message, status,
+    parent_id, idempotency_key, created_at, updated_at, sent_at
+FROM reminders_with_global_slot;
+
+DROP TABLE reminders_with_global_slot;
+
+CREATE INDEX idx_reminders_due ON reminders(user_id, status, scheduled_at);
+CREATE INDEX idx_reminders_record ON reminders(record_id);
+CREATE UNIQUE INDEX idx_reminders_active_slot
+ON reminders(record_id, reminder_type, scheduled_at)
+WHERE status IN ('pending', 'sending');
+
+COMMIT;
+PRAGMA foreign_keys = ON;
+"""
+
 
 def connect(database_path: Path) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,4 +156,10 @@ def connect(database_path: Path) -> sqlite3.Connection:
 
 def init_db(database_path: Path) -> None:
     with connect(database_path) as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'reminders'"
+        ).fetchone()
+        reminder_sql = row["sql"] if row else ""
+        if "UNIQUE(record_id, reminder_type, scheduled_at)" in reminder_sql:
+            conn.executescript(REMINDER_SLOT_MIGRATION)
         conn.executescript(SCHEMA)

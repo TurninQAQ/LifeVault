@@ -10,6 +10,100 @@ from lifevault.storage.repository import VaultRepository
 
 
 class McpClientTest(unittest.TestCase):
+    def test_record_update_preview_confirmation_idempotency_and_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(database_path=Path(tmp) / "record-update.db", use_qwen=False)
+            repo = VaultRepository(settings.database_path)
+            client = InProcessPersonalVaultMcpClient(settings, repo)
+            saved = client.save_record(
+                {
+                    "record_type": "bill",
+                    "title": "水电费",
+                    "amount": 200,
+                    "deadline": "2099-08-01",
+                    "details": {"bill_name": "水电费"},
+                },
+                "update-record",
+                user_confirmed=True,
+            )["record"]
+            changes = {"title": "七月水电费", "due_date": "2099-08-03"}
+
+            preview = client.preview_record_update(saved["id"], changes, expected_version=1)
+            self.assertTrue(preview["ok"])
+            self.assertEqual(preview["record"]["version"], 2)
+            self.assertEqual(repo.get_record("local", saved["id"]).version, 1)
+
+            rejected = client.update_record(
+                saved["id"],
+                changes,
+                expected_version=1,
+                idempotency_key="record-update-rejected",
+                user_confirmed=False,
+            )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], "confirmation_required")
+
+            updated = client.update_record(
+                saved["id"],
+                changes,
+                expected_version=1,
+                idempotency_key="record-update",
+                user_confirmed=True,
+            )
+            repeated = client.update_record(
+                saved["id"],
+                changes,
+                expected_version=1,
+                idempotency_key="record-update",
+                user_confirmed=True,
+            )
+            self.assertTrue(updated["ok"])
+            self.assertEqual(updated["record"]["version"], 2)
+            self.assertEqual(repeated["record"]["version"], 2)
+
+            stale = client.preview_record_update(
+                saved["id"],
+                {"notes": "stale"},
+                expected_version=1,
+            )
+            self.assertFalse(stale["ok"])
+            self.assertEqual(stale["error"]["code"], "version_conflict")
+            self.assertEqual(stale["error"]["current_record"]["version"], 2)
+
+            no_changes = client.update_record(
+                saved["id"],
+                {},
+                expected_version=2,
+                idempotency_key="empty-update",
+                user_confirmed=True,
+            )
+            self.assertFalse(no_changes["ok"])
+            self.assertEqual(no_changes["error"]["code"], "no_changes")
+
+            reused = client.update_record(
+                saved["id"],
+                {"notes": "different"},
+                expected_version=1,
+                idempotency_key="record-update",
+                user_confirmed=True,
+            )
+            self.assertFalse(reused["ok"])
+            self.assertEqual(reused["error"]["code"], "idempotency_conflict")
+
+            logs = client.list_audit_logs(action="update_record")["audit_logs"]
+            successes = [log for log in logs if log["result"] == "ok"]
+            self.assertEqual(len(successes), 1)
+            self.assertFalse(
+                any(
+                    '"error_code": "no_changes"' in (log.get("params_summary") or "")
+                    for log in logs
+                )
+            )
+            summaries = " ".join(log.get("params_summary") or "" for log in logs)
+            self.assertIn("changed_fields", summaries)
+            self.assertNotIn("七月水电费", summaries)
+            self.assertNotIn("2099-08-03", summaries)
+
     def test_in_process_client_confirmation_and_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(database_path=Path(tmp) / "mcp-client.db", use_qwen=False)

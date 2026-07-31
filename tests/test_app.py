@@ -3,16 +3,71 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from lifevault.models.schemas import LifeRecordCreate
 from lifevault.storage.repository import VaultRepository
 
 
 class StreamlitAppTest(unittest.TestCase):
+    def test_saved_record_editor_previews_and_applies_partial_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            st.cache_resource.clear()
+            database_path = Path(tmp) / "saved-editor.db"
+            graph_path = Path(tmp) / "saved-editor-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type="subscription",
+                    title="旧会员",
+                    amount=20,
+                    deadline=date(2099, 8, 15),
+                    details={
+                        "service_name": "旧会员",
+                        "billing_cycle": "monthly",
+                        "auto_renew": True,
+                    },
+                ),
+                "saved-editor-record",
+            )
+            environment = {
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            with patch.dict(os.environ, environment):
+                app = AppTest.from_file("lifevault/app/main.py").run(timeout=15)
+                _button(app, "编辑").click()
+                app.run(timeout=15)
+
+                _widget(app.text_input, "记录标题").set_value("新会员")
+                _widget(app.date_input, "下一续费日期").set_value(date(2099, 8, 20))
+                app.run(timeout=15)
+                self.assertFalse(_button(app, "预览修改").disabled)
+
+                _button(app, "预览修改").click()
+                app.run(timeout=15)
+                self.assertEqual(
+                    app.session_state["record_update_preview"]["preview"]["record"]["title"],
+                    "新会员",
+                )
+                self.assertFalse(_button(app, "确认更新").disabled)
+
+                _button(app, "确认更新").click()
+                app.run(timeout=15)
+                self.assertEqual(list(app.exception), [])
+
+            updated = repo.get_record("local", record.id)
+            self.assertEqual(updated.title, "新会员")
+            self.assertEqual(updated.deadline.isoformat(), "2099-08-20")
+            self.assertEqual(updated.version, 2)
+
     def test_review_forms_render_for_subscription_and_bill(self) -> None:
         cases = [
             (

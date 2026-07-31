@@ -17,6 +17,8 @@ class McpServerTest(unittest.TestCase):
                 "search_records",
                 "list_upcoming_subscriptions",
                 "get_record",
+                "preview_record_update",
+                "update_record",
                 "find_duplicate",
                 "update_record_status",
                 "create_reminder",
@@ -34,6 +36,14 @@ class McpServerTest(unittest.TestCase):
             self.assertEqual(result["search_count"], 1)
             self.assertTrue(result["get_record_title"].startswith("MCP 测试耳机"))
             self.assertGreaterEqual(result["duplicate_count"], 1)
+            self.assertEqual(result["record_update_preview_version"], 2)
+            self.assertEqual(result["record_update_version"], 2)
+            self.assertEqual(result["record_update_replay_version"], 2)
+            self.assertFalse(result["rejected_update"]["ok"])
+            self.assertEqual(
+                result["rejected_update"]["error"]["code"],
+                "confirmation_required",
+            )
             self.assertGreaterEqual(result["list_reminders_count"], 1)
             self.assertEqual(result["snoozed_parent_status"], "snoozed")
             self.assertFalse(result["rejected_save"]["ok"])

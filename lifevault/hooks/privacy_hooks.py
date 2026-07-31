@@ -21,6 +21,17 @@ AUDIT_PARAM_ALLOWLIST = {
     "send_reminder": frozenset({"delivery", "record_status", "error_code"}),
     "rollover_subscription": frozenset({"billing_cycle", "reminder_type", "error_code"}),
     "update_preferences": frozenset({"changed_fields", "error_code"}),
+    "update_record": frozenset(
+        {
+            "changed_fields",
+            "old_version",
+            "new_version",
+            "cancelled_reminder_count",
+            "created_reminder_count",
+            "reminder_types",
+            "error_code",
+        }
+    ),
 }
 AUDIT_ENUM_VALUES = {
     "record_type": frozenset({"purchase", "subscription", "bill"}),
@@ -39,6 +50,26 @@ AUDIT_PREFERENCE_FIELDS = frozenset(
         "default_advance_days",
         "quiet_hours_start",
         "quiet_hours_end",
+    }
+)
+AUDIT_RECORD_FIELDS = frozenset(
+    {
+        "title",
+        "amount",
+        "currency",
+        "event_date",
+        "notes",
+        "merchant",
+        "order_number",
+        "return_deadline",
+        "warranty_deadline",
+        "service_name",
+        "billing_cycle",
+        "next_renewal_date",
+        "auto_renew",
+        "bill_name",
+        "billing_period",
+        "due_date",
     }
 )
 
@@ -118,7 +149,8 @@ def _audit_value(key: str, value: Any) -> str | int | float | bool | list[str] |
             {
                 field
                 for field in value
-                if isinstance(field, str) and field in AUDIT_PREFERENCE_FIELDS
+                if isinstance(field, str)
+                and field in AUDIT_PREFERENCE_FIELDS | AUDIT_RECORD_FIELDS
             }
         )
     if key == "reminder_count":
@@ -128,4 +160,8 @@ def _audit_value(key: str, value: Any) -> str | int | float | bool | list[str] |
             return None
         allowed = AUDIT_ENUM_VALUES["reminder_type"]
         return sorted({item for item in value if isinstance(item, str) and item in allowed})
+    if key in {"old_version", "new_version"}:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+    if key in {"cancelled_reminder_count", "created_reminder_count"}:
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100 else None
     return None

@@ -14,6 +14,7 @@ from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient
 from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
 from lifevault.storage.repository import VaultRepository
+from lifevault.tools.idempotency import stable_key
 from lifevault.worker.reminder_worker import ReminderWorker
 
 
@@ -95,6 +96,27 @@ def main() -> None:
     update.add_argument("record_id")
     update.add_argument("new_status", choices=[status.value for status in RecordStatus])
     update.add_argument("expected_version", type=int)
+
+    edit = sub.add_parser("update", help="Preview or apply a typed partial record update")
+    edit.add_argument("record_id")
+    edit.add_argument("expected_version", type=int)
+    edit.add_argument(
+        "--changes-json",
+        required=True,
+        help="JSON object containing only fields to update; null clears optional fields",
+    )
+    edit.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    edit.add_argument("--yes", action="store_true", help="Confirm the record update")
+    edit.add_argument(
+        "--confirm-duplicate",
+        action="store_true",
+        help="Confirm update even when possible duplicates are found",
+    )
+    edit.add_argument(
+        "--idempotency-key",
+        default=None,
+        help="Optional stable retry key; derived from the request by default",
+    )
 
     worker = sub.add_parser("worker", help="Run reminder worker")
     worker.add_argument("--once", action="store_true", help="Scan once and exit")
@@ -308,6 +330,57 @@ def main() -> None:
         print(f"Updated {record['id']} to {record['status']}, version={record['version']}")
         return
 
+    if args.command == "update":
+        changes = parse_json_object(args.changes_json, "--changes-json")
+        preview_result = mcp_client.preview_record_update(
+            args.record_id,
+            changes,
+            args.expected_version,
+        )
+        preview = require_mcp_ok("preview_record_update", preview_result)
+        print_record_update_preview(preview)
+        if args.dry_run:
+            return
+
+        duplicates = preview.get("duplicate_candidates") or []
+        duplicate_confirmed = args.confirm_duplicate
+        if duplicates and not duplicate_confirmed:
+            if args.yes:
+                raise SystemExit(
+                    "Possible duplicates found; pass --confirm-duplicate to confirm explicitly."
+                )
+            duplicate_confirmed = ask_yes_no("仍然更新这条疑似重复记录？")
+            if not duplicate_confirmed:
+                print("Record update cancelled.")
+                return
+        if not args.yes and not ask_yes_no("提交这次记录更新？"):
+            print("Record update cancelled.")
+            return
+
+        idempotency_key = args.idempotency_key or stable_key(
+            "cli-record-update",
+            args.record_id,
+            args.expected_version,
+            json.dumps(changes, ensure_ascii=False, sort_keys=True),
+            duplicate_confirmed,
+        )
+        update_result = mcp_client.update_record(
+            args.record_id,
+            changes,
+            args.expected_version,
+            idempotency_key,
+            user_confirmed=True,
+            duplicate_confirmed=duplicate_confirmed,
+        )
+        outcome = require_mcp_ok("update_record", update_result)
+        record = outcome["record"]
+        print(
+            f"Updated {record['id']} to version={record['version']}; "
+            f"cancelled_reminders={len(outcome.get('cancelled_reminders') or [])}; "
+            f"created_reminders={len(outcome.get('created_reminders') or [])}"
+        )
+        return
+
     if args.command == "worker":
         worker_service = ReminderWorker(settings, repository)
         if args.once:
@@ -387,6 +460,30 @@ def print_preferences(preference: dict[str, Any]) -> None:
     print(f"default_advance_days: {preference['default_advance_days']}")
     print(f"quiet_hours_start: {preference.get('quiet_hours_start') or '-'}")
     print(f"quiet_hours_end: {preference.get('quiet_hours_end') or '-'}")
+
+
+def parse_json_object(raw_value: str, option_name: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid {option_name}: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{option_name} must contain a JSON object")
+    return value
+
+
+def print_record_update_preview(preview: dict[str, Any]) -> None:
+    print("Record update preview:")
+    print_json(
+        {
+            "record": preview.get("record"),
+            "changed_fields": preview.get("changed_fields") or [],
+            "reminders_to_cancel": preview.get("reminders_to_cancel") or [],
+            "reminders_to_create": preview.get("reminders_to_create") or [],
+            "warnings": preview.get("warnings") or [],
+            "duplicate_candidates": preview.get("duplicate_candidates") or [],
+        }
+    )
 
 
 def require_mcp_ok(tool_name: str, result: dict[str, Any]) -> dict[str, Any]:

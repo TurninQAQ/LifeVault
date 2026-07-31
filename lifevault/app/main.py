@@ -13,6 +13,7 @@ from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
 from lifevault.storage.repository import VaultRepository
+from lifevault.tools.idempotency import stable_key
 
 
 st.set_page_config(page_title="LifeVault", page_icon="LV", layout="wide")
@@ -693,6 +694,10 @@ def _render_field_errors(turn: GraphTurn, field: str) -> None:
 
 
 def render_records(mcp_client: PersonalVaultMcpClient) -> None:
+    notice = st.session_state.pop("record_update_notice", None)
+    if isinstance(notice, str):
+        st.success(notice)
+
     query = st.text_input("关键词", key="record_query")
     result = mcp_client.search_records(query=query or None)
     if not render_mcp_error("search_records", result):
@@ -719,16 +724,385 @@ def render_records(mcp_client: PersonalVaultMcpClient) -> None:
                     "保修截止："
                     f"{details.get('warranty_deadline') or '-'}"
                 )
-            status = st.selectbox(
+            actions = st.columns([2, 1, 1])
+            status = actions[0].selectbox(
                 "状态",
                 options=[item.value for item in RecordStatus],
                 index=[item.value for item in RecordStatus].index(record["status"]),
                 key=f"status_{record['id']}",
             )
-            if st.button("更新状态", key=f"update_{record['id']}"):
+            if actions[1].button("更新状态", key=f"update_{record['id']}"):
                 update_result = mcp_client.update_record_status(record["id"], status, record["version"])
                 if render_mcp_error("update_record_status", update_result):
                     st.rerun()
+            if actions[2].button("编辑", key=f"edit_{record['id']}"):
+                st.session_state["editing_record_id"] = record["id"]
+                st.session_state.pop("record_update_preview", None)
+                st.rerun()
+
+    editing_record_id = st.session_state.get("editing_record_id")
+    if not isinstance(editing_record_id, str):
+        return
+    selected = next(
+        (record for record in records if record["id"] == editing_record_id),
+        None,
+    )
+    if selected is None:
+        selected_result = mcp_client.get_record(editing_record_id)
+        if not render_mcp_error("get_record", selected_result):
+            return
+        selected = selected_result["record"]
+
+    st.divider()
+    render_saved_record_editor(mcp_client, selected)
+
+
+def render_saved_record_editor(
+    mcp_client: PersonalVaultMcpClient,
+    record: dict[str, Any],
+) -> None:
+    record_id = str(record["id"])
+    version = int(record["version"])
+    key_prefix = f"saved_record_{record_id}_{version}"
+    baseline = _saved_record_form_payload(record)
+
+    heading = st.columns([4, 1])
+    heading[0].subheader(f"编辑：{record['title']}")
+    if heading[1].button("关闭", key=f"{key_prefix}_close"):
+        st.session_state.pop("editing_record_id", None)
+        st.session_state.pop("record_update_preview", None)
+        st.rerun()
+
+    common = st.columns(3)
+    title = common[0].text_input(
+        "记录标题",
+        value=str(record.get("title") or ""),
+        max_chars=200,
+        key=f"{key_prefix}_title",
+    )
+    amount_value = record.get("amount")
+    amount = common[1].number_input(
+        "记录金额",
+        min_value=0.0,
+        value=float(amount_value) if amount_value is not None else None,
+        step=1.0,
+        key=f"{key_prefix}_amount",
+    )
+    currency = common[2].text_input(
+        "记录币种",
+        value=str(record.get("currency") or "CNY"),
+        max_chars=3,
+        key=f"{key_prefix}_currency",
+    )
+    event_date = st.date_input(
+        "发生日期",
+        value=_as_date(record.get("event_date")),
+        format="YYYY-MM-DD",
+        key=f"{key_prefix}_event_date",
+    )
+
+    details = record.get("details") or {}
+    values: dict[str, Any] = {
+        "title": title,
+        "amount": amount,
+        "currency": currency,
+        "event_date": _date_value(event_date),
+    }
+    record_type = record["record_type"]
+    if record_type == "purchase":
+        purchase = st.columns(2)
+        values["merchant"] = purchase[0].text_input(
+            "商家",
+            value=str(details.get("merchant") or ""),
+            max_chars=200,
+            key=f"{key_prefix}_merchant",
+        )
+        values["order_number"] = purchase[1].text_input(
+            "订单号",
+            value=str(details.get("order_number") or ""),
+            max_chars=128,
+            key=f"{key_prefix}_order_number",
+        )
+        deadlines = st.columns(2)
+        values["return_deadline"] = _date_value(
+            deadlines[0].date_input(
+                "退货截止日期",
+                value=_as_date(details.get("return_deadline")),
+                format="YYYY-MM-DD",
+                key=f"{key_prefix}_return_deadline",
+            )
+        )
+        values["warranty_deadline"] = _date_value(
+            deadlines[1].date_input(
+                "保修截止日期",
+                value=_as_date(details.get("warranty_deadline")),
+                format="YYYY-MM-DD",
+                key=f"{key_prefix}_warranty_deadline",
+            )
+        )
+    elif record_type == "subscription":
+        subscription = st.columns(2)
+        values["service_name"] = subscription[0].text_input(
+            "服务名称",
+            value=str(details.get("service_name") or ""),
+            max_chars=200,
+            key=f"{key_prefix}_service_name",
+        )
+        cycles = [None, "monthly", "yearly", "weekly", "unknown"]
+        current_cycle = details.get("billing_cycle")
+        values["billing_cycle"] = subscription[1].selectbox(
+            "付费周期",
+            cycles,
+            index=cycles.index(current_cycle) if current_cycle in cycles else 0,
+            format_func=lambda value: value or "未设置",
+            key=f"{key_prefix}_billing_cycle",
+        )
+        subscription_dates = st.columns(2)
+        values["next_renewal_date"] = _date_value(
+            subscription_dates[0].date_input(
+                "下一续费日期",
+                value=_as_date(record.get("deadline")),
+                format="YYYY-MM-DD",
+                key=f"{key_prefix}_next_renewal_date",
+            )
+        )
+        auto_renew_options = [None, True, False]
+        current_auto_renew = details.get("auto_renew")
+        values["auto_renew"] = subscription_dates[1].selectbox(
+            "自动续费",
+            auto_renew_options,
+            index=(
+                auto_renew_options.index(current_auto_renew)
+                if current_auto_renew in auto_renew_options
+                else 0
+            ),
+            format_func=lambda value: "未设置" if value is None else ("是" if value else "否"),
+            key=f"{key_prefix}_auto_renew",
+        )
+    elif record_type == "bill":
+        bill = st.columns(2)
+        values["bill_name"] = bill[0].text_input(
+            "账单名称",
+            value=str(details.get("bill_name") or ""),
+            max_chars=200,
+            key=f"{key_prefix}_bill_name",
+        )
+        values["billing_period"] = bill[1].text_input(
+            "账单周期",
+            value=str(details.get("billing_period") or ""),
+            max_chars=1000,
+            key=f"{key_prefix}_billing_period",
+        )
+        values["due_date"] = _date_value(
+            st.date_input(
+                "缴费截止日期",
+                value=_as_date(record.get("deadline")),
+                format="YYYY-MM-DD",
+                key=f"{key_prefix}_due_date",
+            )
+        )
+
+    values["notes"] = st.text_area(
+        "记录备注",
+        value=str(record.get("notes") or ""),
+        max_chars=1000,
+        key=f"{key_prefix}_notes",
+    )
+    normalized = _normalize_form_payload(values)
+    changes = {
+        field: value
+        for field, value in normalized.items()
+        if baseline.get(field) != value
+    }
+
+    preview_state = st.session_state.get("record_update_preview")
+    current_preview = (
+        preview_state
+        if isinstance(preview_state, dict)
+        and preview_state.get("record_id") == record_id
+        and preview_state.get("expected_version") == version
+        else None
+    )
+    actions = st.columns([1, 1, 3])
+    if actions[0].button(
+        "预览修改",
+        type="primary",
+        disabled=not changes,
+        key=f"{key_prefix}_preview",
+    ):
+        preview_result = mcp_client.preview_record_update(
+            record_id,
+            changes,
+            version,
+        )
+        if render_mcp_error("preview_record_update", preview_result):
+            st.session_state["record_update_preview"] = {
+                "record_id": record_id,
+                "expected_version": version,
+                "changes": changes,
+                "idempotency_key": stable_key(
+                    "streamlit-record-update",
+                    record_id,
+                    version,
+                    json.dumps(changes, ensure_ascii=False, sort_keys=True),
+                ),
+                "preview": preview_result,
+            }
+            st.rerun()
+        else:
+            _render_update_field_errors(preview_result)
+    if actions[1].button("放弃修改", key=f"{key_prefix}_discard"):
+        st.session_state.pop("record_update_preview", None)
+        st.session_state.pop("editing_record_id", None)
+        st.rerun()
+
+    if current_preview is None:
+        return
+    if current_preview.get("changes") != changes:
+        st.warning("表单内容已变化，请重新预览。")
+        return
+    _render_saved_record_update_preview(
+        mcp_client,
+        current_preview,
+        key_prefix,
+    )
+
+
+def _render_saved_record_update_preview(
+    mcp_client: PersonalVaultMcpClient,
+    preview_state: dict[str, Any],
+    key_prefix: str,
+) -> None:
+    preview = preview_state["preview"]
+    st.subheader("修改预览")
+    st.write("修改字段：" + "、".join(preview.get("changed_fields") or []))
+    proposed = preview.get("record") or {}
+    st.write(
+        f"{proposed.get('title') or '-'} · "
+        f"{proposed.get('amount')} {proposed.get('currency') or ''} · "
+        f"截止 {proposed.get('deadline') or '-'}"
+    )
+    for warning in preview.get("warnings") or []:
+        st.warning(warning)
+
+    reminders_to_cancel = preview.get("reminders_to_cancel") or []
+    reminders_to_create = preview.get("reminders_to_create") or []
+    if reminders_to_cancel:
+        st.caption("将取消的提醒")
+        st.dataframe(
+            [
+                {
+                    "类型": reminder["reminder_type"],
+                    "时间": reminder["scheduled_at"],
+                    "状态": reminder["status"],
+                }
+                for reminder in reminders_to_cancel
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+    if reminders_to_create:
+        st.caption("将创建的替代提醒")
+        st.dataframe(
+            [
+                {
+                    "类型": reminder["reminder_type"],
+                    "时间": reminder["scheduled_at"],
+                    "内容": reminder["message"],
+                }
+                for reminder in reminders_to_create
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+    duplicates = preview.get("duplicate_candidates") or []
+    duplicate_confirmed = True
+    if duplicates:
+        st.warning("发现疑似重复记录")
+        for duplicate in duplicates:
+            st.write(
+                f"{duplicate['title']} · {duplicate['score']:.2f} · {duplicate['reason']}"
+            )
+        duplicate_confirmed = st.checkbox(
+            "我确认仍要更新这条疑似重复记录",
+            value=False,
+            key=f"{key_prefix}_duplicate_confirmed",
+        )
+
+    if st.button(
+        "确认更新",
+        type="primary",
+        disabled=not duplicate_confirmed,
+        key=f"{key_prefix}_confirm_update",
+    ):
+        update_result = mcp_client.update_record(
+            preview_state["record_id"],
+            preview_state["changes"],
+            preview_state["expected_version"],
+            preview_state["idempotency_key"],
+            user_confirmed=True,
+            duplicate_confirmed=duplicate_confirmed,
+        )
+        if render_mcp_error("update_record", update_result):
+            st.session_state["record_update_notice"] = (
+                f"记录已更新到 v{update_result['record']['version']}，"
+                f"取消 {len(update_result.get('cancelled_reminders') or [])} 个提醒，"
+                f"新建 {len(update_result.get('created_reminders') or [])} 个提醒。"
+            )
+            st.session_state.pop("record_update_preview", None)
+            st.session_state.pop("editing_record_id", None)
+            st.rerun()
+        else:
+            _render_update_field_errors(update_result)
+
+
+def _saved_record_form_payload(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.get("details") or {}
+    payload: dict[str, Any] = {
+        "title": record.get("title"),
+        "amount": record.get("amount"),
+        "currency": record.get("currency"),
+        "event_date": record.get("event_date"),
+        "notes": record.get("notes"),
+    }
+    if record.get("record_type") == "purchase":
+        payload.update(
+            {
+                "merchant": details.get("merchant"),
+                "order_number": details.get("order_number"),
+                "return_deadline": details.get("return_deadline"),
+                "warranty_deadline": details.get("warranty_deadline"),
+            }
+        )
+    elif record.get("record_type") == "subscription":
+        payload.update(
+            {
+                "service_name": details.get("service_name"),
+                "billing_cycle": details.get("billing_cycle"),
+                "next_renewal_date": record.get("deadline"),
+                "auto_renew": details.get("auto_renew"),
+            }
+        )
+    elif record.get("record_type") == "bill":
+        payload.update(
+            {
+                "bill_name": details.get("bill_name"),
+                "billing_period": details.get("billing_period"),
+                "due_date": record.get("deadline"),
+            }
+        )
+    return _normalize_form_payload(payload)
+
+
+def _render_update_field_errors(result: dict[str, Any]) -> None:
+    error = result.get("error") if isinstance(result, dict) else None
+    field_errors = error.get("field_errors") if isinstance(error, dict) else None
+    if not isinstance(field_errors, dict):
+        return
+    for field, messages in field_errors.items():
+        for message in messages:
+            st.error(f"{field}: {message}")
 
 
 def render_reminders(mcp_client: PersonalVaultMcpClient, timezone_name: str) -> None:
@@ -772,6 +1146,7 @@ def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
         options=[
             "all",
             "save_record",
+            "update_record",
             "update_record_status",
             "create_reminder",
             "snooze_reminder",

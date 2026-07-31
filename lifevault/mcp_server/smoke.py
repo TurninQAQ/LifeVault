@@ -150,6 +150,52 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     },
                 )
                 require_ok("find_duplicate", duplicate_result)
+                update_changes = {"notes": "stdio smoke updated"}
+                update_preview = await call_json(
+                    session,
+                    "preview_record_update",
+                    {
+                        "record_id": record_id,
+                        "changes": update_changes,
+                        "expected_version": 1,
+                    },
+                )
+                require_ok("preview_record_update", update_preview)
+                rejected_update = await call_json(
+                    session,
+                    "update_record",
+                    {
+                        "record_id": record_id,
+                        "changes": update_changes,
+                        "expected_version": 1,
+                        "idempotency_key": f"mcp-smoke-update-rejected-{run_id}",
+                        "user_confirmed": False,
+                    },
+                )
+                update_result = await call_json(
+                    session,
+                    "update_record",
+                    {
+                        "record_id": record_id,
+                        "changes": update_changes,
+                        "expected_version": 1,
+                        "idempotency_key": f"mcp-smoke-update-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("update_record", update_result)
+                repeated_update = await call_json(
+                    session,
+                    "update_record",
+                    {
+                        "record_id": record_id,
+                        "changes": update_changes,
+                        "expected_version": 1,
+                        "idempotency_key": f"mcp-smoke-update-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("update_record repeated", repeated_update)
 
                 reminder_result = await call_json(
                     session,
@@ -227,7 +273,7 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                 update_status_result = await call_json(
                     session,
                     "update_record_status",
-                    {"record_id": record_id, "new_status": "completed", "expected_version": 1},
+                    {"record_id": record_id, "new_status": "completed", "expected_version": 2},
                 )
                 require_ok("update_record_status", update_status_result)
                 audit_result = await call_json(session, "list_audit_logs", {"limit": 100})
@@ -247,6 +293,10 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "search_count": len(search_result["records"]),
                     "get_record_title": get_result["record"]["title"],
                     "duplicate_count": len(duplicate_result["duplicate_candidates"]),
+                    "record_update_preview_version": update_preview["record"]["version"],
+                    "record_update_version": update_result["record"]["version"],
+                    "record_update_replay_version": repeated_update["record"]["version"],
+                    "rejected_update": rejected_update,
                     "reminder_id": reminder_id,
                     "list_reminders_count": len(list_result["reminders"]),
                     "snoozed_parent_status": snooze_result["parent_reminder"]["status"],

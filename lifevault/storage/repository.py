@@ -14,6 +14,9 @@ from lifevault.models.schemas import (
     LifeRecordCreate,
     RecordStatus,
     RecordType,
+    RecordUpdatePatch,
+    RecordUpdatePreview,
+    RecordUpdateResult,
     Reminder,
     ReminderBatchCreate,
     ReminderCreate,
@@ -22,6 +25,11 @@ from lifevault.models.schemas import (
     UserPreference,
     UserPreferencePatch,
     UserPreferenceUpdateResult,
+)
+from lifevault.records.update_planner import (
+    RecordUpdateError,
+    plan_record_update,
+    update_needs_duplicate_confirmation,
 )
 from lifevault.storage.database import connect, init_db
 from lifevault.tools.idempotency import stable_key
@@ -419,7 +427,10 @@ class VaultRepository:
                 WHERE user_id = ?
                   AND record_id = ?
                   AND reminder_type = ?
-                  AND (idempotency_key = ? OR scheduled_at = ?)
+                  AND (
+                      idempotency_key = ?
+                      OR (scheduled_at = ? AND status IN (?, ?))
+                  )
                 LIMIT 1
                 """,
                 (
@@ -428,6 +439,8 @@ class VaultRepository:
                     ReminderType.RENEWAL.value,
                     idempotency_key,
                     _dt_to_text(reminder.scheduled_at),
+                    ReminderStatus.PENDING.value,
+                    ReminderStatus.SENDING.value,
                 ),
             ).fetchone()
             if not reminder_row:
@@ -481,18 +494,39 @@ class VaultRepository:
         user_id: str,
         record: LifeRecordCreate,
         limit: int = 5,
+        exclude_record_id: str | None = None,
     ) -> list[DuplicateCandidate]:
         with connect(self.database_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM life_records
-                WHERE user_id = ? AND type = ? AND status != ?
-                ORDER BY created_at DESC
-                LIMIT 200
-                """,
-                (user_id, record.record_type.value, RecordStatus.CANCELLED.value),
-            ).fetchall()
+            return self._find_duplicate_conn(
+                conn,
+                user_id,
+                record,
+                limit=limit,
+                exclude_record_id=exclude_record_id,
+            )
 
+    def _find_duplicate_conn(
+        self,
+        conn: Any,
+        user_id: str,
+        record: LifeRecordCreate,
+        limit: int = 5,
+        exclude_record_id: str | None = None,
+    ) -> list[DuplicateCandidate]:
+        sql = """
+            SELECT * FROM life_records
+            WHERE user_id = ? AND type = ? AND status != ?
+        """
+        params: list[Any] = [
+            user_id,
+            record.record_type.value,
+            RecordStatus.CANCELLED.value,
+        ]
+        if exclude_record_id is not None:
+            sql += " AND id != ?"
+            params.append(exclude_record_id)
+        sql += " ORDER BY created_at DESC LIMIT 200"
+        rows = conn.execute(sql, params).fetchall()
         candidates: list[DuplicateCandidate] = []
         for row in rows:
             existing = self._row_to_record(row)
@@ -535,6 +569,290 @@ class VaultRepository:
 
         return sorted(candidates, key=lambda item: item.score, reverse=True)[:limit]
 
+    def preview_record_update(
+        self,
+        user_id: str,
+        record_id: str,
+        patch: RecordUpdatePatch,
+        expected_version: int,
+        timezone_name: str,
+        now: datetime,
+    ) -> RecordUpdatePreview:
+        with connect(self.database_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            if not row:
+                raise RecordUpdateError("record_not_found", "Record not found.")
+            current = self._row_to_record(row)
+            if current.version != expected_version:
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=current,
+                )
+
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            preview = plan_record_update(
+                current,
+                patch,
+                reminders,
+                timezone_name,
+                now,
+            )
+            if update_needs_duplicate_confirmation(preview.changed_fields):
+                duplicates = self._find_duplicate_conn(
+                    conn,
+                    user_id,
+                    LifeRecordCreate.model_validate(preview.record.model_dump()),
+                    exclude_record_id=record_id,
+                )
+                preview = preview.model_copy(
+                    update={"duplicate_candidates": duplicates}
+                )
+            return preview
+
+    def update_record(
+        self,
+        user_id: str,
+        record_id: str,
+        patch: RecordUpdatePatch,
+        expected_version: int,
+        timezone_name: str,
+        now: datetime,
+        idempotency_key: str,
+        duplicate_confirmed: bool,
+        actor: str = "mcp",
+    ) -> RecordUpdateResult:
+        patch_payload = patch.model_dump(
+            mode="json",
+            include=patch.model_fields_set,
+        )
+        request_hash = stable_key(
+            "record-update-request",
+            user_id,
+            record_id,
+            expected_version,
+            json.dumps(patch_payload, ensure_ascii=False, sort_keys=True),
+            duplicate_confirmed,
+        )
+        with connect(self.database_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            operation = conn.execute(
+                """
+                SELECT request_hash, result_json
+                FROM record_update_operations
+                WHERE user_id = ? AND idempotency_key = ?
+                """,
+                (user_id, idempotency_key),
+            ).fetchone()
+            if operation:
+                if operation["request_hash"] != request_hash:
+                    raise RecordUpdateError(
+                        "idempotency_conflict",
+                        "idempotency_key was already used for a different record update.",
+                    )
+                return RecordUpdateResult.model_validate_json(operation["result_json"])
+
+            row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            if not row:
+                raise RecordUpdateError("record_not_found", "Record not found.")
+            current = self._row_to_record(row)
+            if current.version != expected_version:
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=current,
+                )
+
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            preview = plan_record_update(
+                current,
+                patch,
+                reminders,
+                timezone_name,
+                now,
+            )
+            duplicates: list[DuplicateCandidate] = []
+            if update_needs_duplicate_confirmation(preview.changed_fields):
+                duplicates = self._find_duplicate_conn(
+                    conn,
+                    user_id,
+                    LifeRecordCreate.model_validate(preview.record.model_dump()),
+                    exclude_record_id=record_id,
+                )
+                if duplicates and not duplicate_confirmed:
+                    raise RecordUpdateError(
+                        "duplicate_confirmation_required",
+                        "Possible duplicate records require explicit confirmation.",
+                        duplicate_candidates=duplicates,
+                    )
+
+            updated_at = preview.record.updated_at.isoformat()
+            cursor = conn.execute(
+                """
+                UPDATE life_records
+                SET title = ?, amount = ?, currency = ?, event_date = ?, deadline = ?,
+                    details_json = ?, notes = ?, version = version + 1, updated_at = ?
+                WHERE user_id = ? AND id = ? AND version = ?
+                """,
+                (
+                    preview.record.title,
+                    preview.record.amount,
+                    preview.record.currency,
+                    _date_to_text(preview.record.event_date),
+                    _date_to_text(preview.record.deadline),
+                    json.dumps(preview.record.details, ensure_ascii=False, sort_keys=True),
+                    preview.record.notes,
+                    updated_at,
+                    user_id,
+                    record_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                latest_row = conn.execute(
+                    "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                    (user_id, record_id),
+                ).fetchone()
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=self._row_to_record(latest_row) if latest_row else None,
+                )
+
+            reminder_ids_to_cancel = [
+                reminder.id for reminder in preview.reminders_to_cancel
+            ]
+            if reminder_ids_to_cancel:
+                placeholders = ",".join("?" for _ in reminder_ids_to_cancel)
+                conn.execute(
+                    f"""
+                    UPDATE reminders
+                    SET status = ?, updated_at = ?
+                    WHERE user_id = ? AND id IN ({placeholders}) AND status IN (?, ?)
+                    """,
+                    [
+                        ReminderStatus.CANCELLED.value,
+                        updated_at,
+                        user_id,
+                        *reminder_ids_to_cancel,
+                        ReminderStatus.PENDING.value,
+                        ReminderStatus.SNOOZED.value,
+                    ],
+                )
+
+            created_rows: list[Any] = []
+            for index, reminder in enumerate(preview.reminders_to_create):
+                reminder_id = str(uuid4())
+                reminder_key = stable_key(
+                    "record-update-reminder",
+                    user_id,
+                    idempotency_key,
+                    index,
+                    reminder.parent_id,
+                    reminder.reminder_type.value,
+                    reminder.scheduled_at.isoformat(),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO reminders(
+                        id, record_id, user_id, scheduled_at, reminder_type, message, status,
+                        parent_id, idempotency_key, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reminder_id,
+                        record_id,
+                        user_id,
+                        _dt_to_text(reminder.scheduled_at),
+                        reminder.reminder_type.value,
+                        reminder.message,
+                        ReminderStatus.PENDING.value,
+                        reminder.parent_id,
+                        reminder_key,
+                        updated_at,
+                        updated_at,
+                    ),
+                )
+                created_rows.append(
+                    conn.execute(
+                        "SELECT * FROM reminders WHERE id = ?",
+                        (reminder_id,),
+                    ).fetchone()
+                )
+
+            cancelled_rows: list[Any] = []
+            for reminder_id in reminder_ids_to_cancel:
+                cancelled_rows.append(
+                    conn.execute(
+                        "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                        (user_id, reminder_id),
+                    ).fetchone()
+                )
+
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action="update_record",
+                target_id=record_id,
+                result="ok",
+                params={
+                    "changed_fields": preview.changed_fields,
+                    "old_version": expected_version,
+                    "new_version": expected_version + 1,
+                    "cancelled_reminder_count": len(cancelled_rows),
+                    "created_reminder_count": len(created_rows),
+                    "reminder_types": sorted(
+                        {
+                            row["reminder_type"]
+                            for row in [*cancelled_rows, *created_rows]
+                        }
+                    ),
+                },
+            )
+            updated_row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            result = RecordUpdateResult(
+                record=self._row_to_record(updated_row),
+                changed_fields=preview.changed_fields,
+                cancelled_reminders=[
+                    self._row_to_reminder(row)
+                    for row in cancelled_rows
+                    if row is not None
+                ],
+                created_reminders=[
+                    self._row_to_reminder(row)
+                    for row in created_rows
+                    if row is not None
+                ],
+                warnings=preview.warnings,
+                duplicate_candidates=duplicates,
+            )
+            conn.execute(
+                """
+                INSERT INTO record_update_operations(
+                    user_id, idempotency_key, request_hash, record_id, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    idempotency_key,
+                    request_hash,
+                    record_id,
+                    result.model_dump_json(),
+                    updated_at,
+                ),
+            )
+            return result
+
     def update_record_status(
         self,
         user_id: str,
@@ -567,6 +885,22 @@ class VaultRepository:
             row = conn.execute("SELECT * FROM life_records WHERE id = ?", (record_id,)).fetchone()
             return self._row_to_record(row)
 
+    def _list_record_reminders_conn(
+        self,
+        conn: Any,
+        user_id: str,
+        record_id: str,
+    ) -> list[Reminder]:
+        rows = conn.execute(
+            """
+            SELECT * FROM reminders
+            WHERE user_id = ? AND record_id = ?
+            ORDER BY created_at ASC, updated_at ASC
+            """,
+            (user_id, record_id),
+        ).fetchall()
+        return [self._row_to_reminder(row) for row in rows]
+
     def create_reminder(
         self,
         user_id: str,
@@ -586,11 +920,14 @@ class VaultRepository:
                 """
                 SELECT * FROM reminders
                 WHERE record_id = ? AND reminder_type = ? AND scheduled_at = ?
+                  AND status IN (?, ?)
                 """,
                 (
                     reminder.record_id,
                     reminder.reminder_type.value,
                     _dt_to_text(reminder.scheduled_at),
+                    ReminderStatus.PENDING.value,
+                    ReminderStatus.SENDING.value,
                 ),
             ).fetchone()
             if duplicate:
@@ -700,12 +1037,15 @@ class VaultRepository:
                         """
                         SELECT * FROM reminders
                         WHERE user_id = ? AND record_id = ? AND reminder_type = ? AND scheduled_at = ?
+                          AND status IN (?, ?)
                         """,
                         (
                             user_id,
                             reminder.record_id,
                             reminder.reminder_type.value,
                             _dt_to_text(reminder.scheduled_at),
+                            ReminderStatus.PENDING.value,
+                            ReminderStatus.SENDING.value,
                         ),
                     ).fetchone()
                 if not row:
@@ -823,11 +1163,14 @@ class VaultRepository:
                 """
                 SELECT * FROM reminders
                 WHERE record_id = ? AND reminder_type = ? AND scheduled_at = ?
+                  AND status IN (?, ?)
                 """,
                 (
                     original["record_id"],
                     original["reminder_type"],
                     _dt_to_text(new_scheduled_at),
+                    ReminderStatus.PENDING.value,
+                    ReminderStatus.SENDING.value,
                 ),
             ).fetchone()
             if duplicate:

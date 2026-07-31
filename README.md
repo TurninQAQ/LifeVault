@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.14 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.15 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 
@@ -12,6 +12,9 @@ Implemented chain:
 natural language -> Qwen/fallback extraction -> LangGraph interrupts
 -> deterministic tools -> user confirmation -> MCP Client -> MCP Server
 -> SQLite record -> reminder confirmation -> SQLite reminder -> worker notification
+
+saved record -> MCP update preview -> user confirmation
+-> optimistic-lock update + reminder replan + audit in one SQLite transaction
 ```
 
 The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
@@ -101,7 +104,20 @@ v0.14 adds a typed record-review loop before save:
 - Exact return and warranty dates override duration calculations with a visible warning. Logically impossible purchase and subscription date orderings are rejected.
 - Streamlit disables save while edits are unapplied. CLI scripts can use `resume THREAD_ID --corrections-json '{...}'`.
 - Save idempotency uses the normalized final record. v0.13 record, duplicate-review, and reminder checkpoints remain resumable.
-- Saved-record editing, record-type changes, OCR/PDF import, draft history, and post-save reminder replanning remain out of scope.
+- In v0.14, saved-record editing, record-type changes, OCR/PDF import, draft history, and post-save reminder replanning remained out of scope.
+
+v0.15 closes the saved-record editing and reminder-consistency loop:
+
+- `RecordUpdatePatch` accepts strict type-specific partial changes. Missing fields stay unchanged, explicit `null` clears optional values, and record type/system metadata remain immutable.
+- MCP `preview_record_update` returns the proposed record, field list, warnings, duplicate candidates, and exact reminder cancellation/creation plan without writing.
+- MCP `update_record` requires explicit confirmation, optimistic `expected_version`, and a stable idempotency key. Exact retries return the original result; conflicting key reuse is rejected.
+- Duplicate-sensitive edits rerun duplicate detection excluding the current record and require separate confirmation when matches exist.
+- Record updates, reminder cancellation/replacement, privacy-filtered audit, and idempotency result storage commit in one SQLite transaction.
+- Affected pending/snoozed reminder history is preserved through replacement parent links. Sent/failed/cancelled history is unchanged, and updates fail while an affected reminder is being sent.
+- Reminder scheduling preserves the latest effective offset and clock time. Past deadlines skip replacement; elapsed advance times are scheduled immediately.
+- Existing reminder rows are migrated without data loss from global slot uniqueness to uniqueness for active reminder slots only, allowing title-only replacement at the same time.
+- Streamlit provides record-type-specific saved-record forms with preview-before-confirmation. CLI supports JSON partial updates and `--dry-run`.
+- Record-type changes, natural-language persisted updates, deletion, OCR/PDF import, and draft history remain out of scope.
 
 Create-record interrupts:
 
@@ -154,6 +170,9 @@ python -m lifevault.cli preferences set --quiet-start 22:00 --quiet-end 08:00 --
 python -m lifevault.cli preferences set --clear-quiet-hours --yes
 python -m lifevault.cli snooze-reminder REMINDER_ID --minutes 60
 python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:00
+python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"title":"新标题","return_deadline":"2026-08-08"}' --dry-run
+python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"title":"新标题","return_deadline":"2026-08-08"}' --yes
+python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"order_number":"ORDER-100"}' --yes --confirm-duplicate
 python -m lifevault.cli worker --once
 python -m lifevault.cli eval
 python -m lifevault.cli eval --json-out eval_report.json
@@ -196,6 +215,8 @@ save_record
 search_records
 list_upcoming_subscriptions
 get_record
+preview_record_update
+update_record
 get_preferences
 find_duplicate
 update_record_status
@@ -208,7 +229,7 @@ cancel_reminder
 list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and atomic reminder-batch creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference updates are host/UI operations and are not part of the model-generated tool plan.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `update_record`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. `update_record` also requires `expected_version` and `idempotency_key`; possible duplicate edits require `duplicate_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and atomic reminder-batch creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference and saved-record updates are host/UI operations and are not part of the model-generated tool plan.
 
 ## Streamlit
 
@@ -216,7 +237,7 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 python3 -m streamlit run lifevault/app/main.py
 ```
 
-Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings.
+Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports typed saved-record editing with an MCP-computed reminder-impact preview before confirmation.
 
 ## Tests
 
@@ -229,6 +250,7 @@ python -m unittest discover -s tests -v
 - `lifevault/models`: Pydantic schemas and Qwen adapter.
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
+- `lifevault/records`: deterministic persisted-record update and reminder-replan planning.
 - `lifevault/agent`: LangGraph create-record workflow plus the v0.1 service fallback.
 - `lifevault/mcp_server`: FastMCP stdio server, in-process MCP client, and smoke client.
 - `lifevault/app`: Streamlit UI.

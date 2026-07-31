@@ -11,12 +11,14 @@ from lifevault.models.schemas import (
     LifeRecordCreate,
     RecordStatus,
     RecordType,
+    RecordUpdatePatch,
     ReminderBatchCreate,
     ReminderCreate,
     ReminderStatus,
     ReminderType,
     UserPreferencePatch,
 )
+from lifevault.records.update_planner import RecordUpdateError
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.date_tools import now_in_timezone
 from lifevault.tools.idempotency import stable_key
@@ -140,6 +142,122 @@ def create_server(
             return _ok(record=_model(record))
         except ValueError as exc:
             return _fail("get_record_failed", str(exc))
+
+    @mcp.tool(description="Preview a typed partial update and its reminder impact without writing.")
+    def preview_record_update(
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+    ) -> dict[str, Any]:
+        try:
+            patch = RecordUpdatePatch.model_validate(changes)
+        except ValidationError as exc:
+            return _fail(
+                "invalid_record_update",
+                "The record update failed validation.",
+                field_errors=_validation_errors(exc),
+            )
+        try:
+            preview = repo.preview_record_update(
+                user_id,
+                record_id,
+                patch,
+                expected_version,
+                active_settings.default_timezone,
+                now_in_timezone(active_settings.default_timezone),
+            )
+            return _ok(**preview.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            return _record_update_failure(exc)
+        except Exception:
+            return _fail("preview_record_update_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Atomically update a saved record and affected reminders after confirmation.")
+    def update_record(
+        record_id: str,
+        changes: dict[str, Any],
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+        duplicate_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        requested_fields = sorted(changes) if isinstance(changes, dict) else []
+        audit_params = {"changed_fields": requested_fields}
+        if not user_confirmed:
+            audit_mcp_failure(
+                "update_record",
+                "rejected",
+                "confirmation_required",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail(
+                "confirmation_required",
+                "Updating a record requires user_confirmed=true.",
+            )
+        if not idempotency_key:
+            audit_mcp_failure(
+                "update_record",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
+        try:
+            patch = RecordUpdatePatch.model_validate(changes)
+        except ValidationError as exc:
+            audit_mcp_failure(
+                "update_record",
+                "rejected",
+                "invalid_record_update",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail(
+                "invalid_record_update",
+                "The record update failed validation.",
+                field_errors=_validation_errors(exc),
+            )
+
+        audit_params = {"changed_fields": sorted(patch.model_fields_set)}
+        try:
+            result = repo.update_record(
+                user_id,
+                record_id,
+                patch,
+                expected_version,
+                active_settings.default_timezone,
+                now_in_timezone(active_settings.default_timezone),
+                idempotency_key,
+                duplicate_confirmed,
+                actor="mcp",
+            )
+            return _ok(**result.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            result_type = (
+                "failed"
+                if exc.code in {"version_conflict", "reminder_in_flight", "idempotency_conflict"}
+                else "rejected"
+            )
+            if exc.code != "no_changes":
+                audit_mcp_failure(
+                    "update_record",
+                    result_type,
+                    exc.code,
+                    target_id=record_id,
+                    params=audit_params,
+                )
+            return _record_update_failure(exc)
+        except Exception:
+            audit_mcp_failure(
+                "update_record",
+                "failed",
+                "internal_error",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("update_record_failed", "Tool execution failed.")
 
     @mcp.tool(description="Get reminder and quiet-hours preferences for the configured local user.")
     def get_preferences() -> dict[str, Any]:
@@ -565,8 +683,8 @@ def _ok(**data: Any) -> dict[str, Any]:
     return {"ok": True, **data}
 
 
-def _fail(code: str, message: str) -> dict[str, Any]:
-    return {"ok": False, "error": {"code": code, "message": message}}
+def _fail(code: str, message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": {"code": code, "message": message, **details}}
 
 
 def _model(value: Any) -> dict[str, Any]:
@@ -581,6 +699,29 @@ def _parse_datetime_required(value: str) -> datetime:
     if not value:
         raise ValueError("datetime value is required.")
     return datetime.fromisoformat(value)
+
+
+def _validation_errors(exc: ValidationError) -> dict[str, list[str]]:
+    errors: dict[str, list[str]] = {}
+    for item in exc.errors(include_url=False):
+        location = item.get("loc") or ("changes",)
+        field = str(location[0])
+        errors.setdefault(field, []).append(str(item.get("msg", "Invalid value.")))
+    return errors
+
+
+def _record_update_failure(exc: RecordUpdateError) -> dict[str, Any]:
+    details: dict[str, Any] = {}
+    if exc.field_errors:
+        details["field_errors"] = exc.field_errors
+    if exc.current_record is not None:
+        details["current_record"] = exc.current_record.model_dump(mode="json")
+    if exc.duplicate_candidates:
+        details["duplicate_candidates"] = [
+            candidate.model_dump(mode="json")
+            for candidate in exc.duplicate_candidates
+        ]
+    return _fail(exc.code, str(exc), **details)
 
 
 if __name__ == "__main__":

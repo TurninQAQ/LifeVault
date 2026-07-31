@@ -261,6 +261,97 @@ class LifeRecord(LifeRecordCreate):
     updated_at: datetime
 
 
+class RecordUpdatePatch(BaseModel):
+    """User-authored partial update for one persisted record."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        allow_inf_nan=False,
+    )
+
+    title: str | None = None
+    amount: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+    event_date: date | None = None
+    notes: str | None = None
+
+    merchant: str | None = None
+    order_number: str | None = None
+    return_deadline: date | None = None
+    warranty_deadline: date | None = None
+
+    service_name: str | None = None
+    billing_cycle: Literal["monthly", "yearly", "weekly", "unknown"] | None = None
+    next_renewal_date: date | None = None
+    auto_renew: StrictBool | None = None
+
+    bill_name: str | None = None
+    billing_period: str | None = None
+    due_date: date | None = None
+
+    @field_validator(
+        "title",
+        "merchant",
+        "order_number",
+        "service_name",
+        "bill_name",
+        "notes",
+        "billing_period",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(ord(character) < 32 for character in normalized):
+            raise ValueError("Control characters are not allowed.")
+        return normalized
+
+    @field_validator("title", "merchant", "service_name", "bill_name")
+    @classmethod
+    def validate_short_text(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 200:
+            raise ValueError("Must contain at most 200 characters.")
+        return value
+
+    @field_validator("order_number")
+    @classmethod
+    def validate_order_number(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 128:
+            raise ValueError("Must contain at most 128 characters.")
+        return value
+
+    @field_validator("notes", "billing_period")
+    @classmethod
+    def validate_long_text(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 1000:
+            raise ValueError("Must contain at most 1000 characters.")
+        return value
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def validate_currency(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            raise ValueError("Currency must be a three-letter code.")
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            raise ValueError("Currency must be a three-letter code.")
+        return normalized
+
+    @field_validator("title", "amount", "currency")
+    @classmethod
+    def validate_required_values(cls, value: Any, info: Any) -> Any:
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be cleared.")
+        return value
+
+
 class ReminderCreate(BaseModel):
     record_id: str
     scheduled_at: datetime
@@ -317,6 +408,25 @@ class DuplicateCandidate(BaseModel):
     title: str
     reason: str
     score: float
+
+
+class RecordUpdatePreview(BaseModel):
+    current_record: LifeRecord
+    record: LifeRecord
+    changed_fields: list[str] = Field(default_factory=list)
+    reminders_to_cancel: list[Reminder] = Field(default_factory=list)
+    reminders_to_create: list[ReminderCreate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
+
+
+class RecordUpdateResult(BaseModel):
+    record: LifeRecord
+    changed_fields: list[str] = Field(default_factory=list)
+    cancelled_reminders: list[Reminder] = Field(default_factory=list)
+    created_reminders: list[Reminder] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
 
 
 class DraftResult(BaseModel):
