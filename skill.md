@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.15 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v0.16 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.15 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v0.16 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -19,6 +19,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - SQLite 保存记录、提醒、偏好、检查点和审计日志。
 - Reminder Worker 在后台扫描并发送桌面通知。
 - 已保存记录可以通过 MCP 预览并原子更新，同时重排受影响提醒。
+- 已保存记录可以通过独立 LangGraph 自然语言修改，但必须由用户选择目标并确认补丁。
 
 核心设计原则：
 
@@ -32,7 +33,7 @@ Worker 负责长期任务
 用户负责最终确认
 ```
 
-大模型不直接写数据库、不直接调用桌面通知，也不能绕过用户确认。模型给出的 `tool_plan` 只是经过白名单过滤的候选计划，实际执行顺序由 Agent 和 LangGraph 决定。
+大模型不直接写数据库、不直接调用桌面通知，也不能绕过用户确认。创建流程中的 `tool_plan` 和更新流程中的目标/Patch 都只是受校验的候选意图，实际工具、记录 ID、版本、幂等键和执行顺序由 Agent 与 LangGraph 决定。
 
 ## 2. 当前完整链路
 
@@ -58,15 +59,28 @@ Worker 负责长期任务
   -> 更新与提醒影响预览
   -> 用户确认
   -> 乐观锁、记录更新、提醒重排、审计和幂等结果原子提交
+
+自然语言修改已保存记录
+  -> Qwen / fallback 提取目标搜索条件
+  -> MCP 搜索
+  -> 用户明确选择目标记录
+  -> 按已知记录类型提取绝对 Patch 或状态
+  -> 确定性解析并冻结相对日期
+  -> MCP 只读预览
+  -> 用户结构化纠正和确认
+  -> MCP 原子提交
 ```
 
 主要代码入口：
 
 - [`lifevault/models/schemas.py`](lifevault/models/schemas.py)：领域模型和 Pydantic 校验。
 - [`lifevault/models/llm_factory.py`](lifevault/models/llm_factory.py)：Qwen 与 fallback 提取。
+- [`lifevault/models/update_extractor.py`](lifevault/models/update_extractor.py)：自然语言目标与更新补丁的两阶段提取。
 - [`lifevault/tools/date_tools.py`](lifevault/tools/date_tools.py)：确定性日期工具。
 - [`lifevault/agent/service.py`](lifevault/agent/service.py)：业务构建和提醒规划。
 - [`lifevault/agent/graph_agent.py`](lifevault/agent/graph_agent.py)：LangGraph 工作流。
+- [`lifevault/agent/update_graph_agent.py`](lifevault/agent/update_graph_agent.py)：独立的已保存记录自然语言更新图。
+- [`lifevault/agent/update_intent.py`](lifevault/agent/update_intent.py)：模型更新意图到严格 Patch 的确定性转换。
 - [`lifevault/mcp_server/server.py`](lifevault/mcp_server/server.py)：MCP 工具边界。
 - [`lifevault/storage/repository.py`](lifevault/storage/repository.py)：SQLite 事务和查询。
 - [`lifevault/records/update_planner.py`](lifevault/records/update_planner.py)：已保存记录更新和提醒重排计划。
@@ -93,6 +107,7 @@ Worker 负责长期任务
 | v0.13 | `d0cf075` | 商品多提醒 | 退货和保修提醒原子批量创建 |
 | v0.14 | `bbb7ec2` | 保存前校对 | 用户可修改候选并重新计算 |
 | v0.15 | `8cf4704` | 保存后编辑 | 原子更新记录并重排已有提醒 |
+| v0.16 | `e9cace7` | 自然语言更新 | 选目标、预览、纠正、确认后原子修改 |
 
 ---
 
@@ -766,15 +781,97 @@ record_id + expected_version + changes
 
 ---
 
-## 19. 当前测试体系
+## 19. v0.16：受控的自然语言已保存记录更新
 
-当前共有 109 个测试，主要分层如下：
+**目标**
+
+让用户可以说“把 ChatGPT Plus 的月费改成 25 美元”或“把房租标记为已支付”，同时保持 v0.15 已建立的预览、确认、乐观锁、幂等、提醒一致性和审计边界。
+
+**实现内容**
+
+- 新增独立 `RecordUpdateGraphAgent`，不扩展创建记录图，避免创建和更新两种生命周期互相污染。
+- 模型分两阶段工作：
+  - 第一阶段只提取 `record_type`、搜索关键词和目标日期文本。
+  - 用户选中目标并知道真实记录类型后，第二阶段才提取更新字段或目标状态。
+- 模型不能输出或决定记录 ID、版本、用户确认、重复确认和幂等键；这些权限字段由 Graph 和 MCP 主机代码生成。
+- 未预选记录时，Graph 固定调用 MCP `search_records(limit=10)`，即使只有一个结果也必须由用户选择。
+- 从单条记录入口发起时可以预选 ID，但 Graph 仍重新通过 MCP 读取记录和版本。
+- `NaturalRecordUpdateIntent` 只表达绝对赋值、显式清空和状态意图。`RecordUpdatePatch` 再执行最终字段白名单和类型校验。
+- 相对日期先保留文本，再由 `date_tools` 确定性解析；第一次补丁构建后把绝对日期、原文本和冻结时间写入 checkpoint。
+- 只接受“改成 25”“设为明天”“清空备注”这类操作；“加 10”“往后推三天”“追加文字”不会转换成写操作，而是要求补充绝对值。
+- 内容更新和状态更新必须拆开。付款、退款、停止扣款和取消真实订阅属于外部动作，LifeVault 明确拒绝，不能伪装成本地状态更新。
+- 更新 checkpoint 只保存脱敏输入、搜索条件、候选 ID、选中 ID/版本、冻结补丁、日期来源、阶段和错误；完整记录在恢复和展示时重新通过 MCP 获取。
+- 版本冲突后重新读取最新记录并生成新预览，原确认失效，用户必须再次确认。
+- 无实际变化时以 `no_changes` 成功只读结束，不增加版本、不修改提醒、不写审计。
+
+**Qwen 与规则怎样协作**
+
+v0.16 没有简单采用“Qwen 成功就完全相信，否则 fallback”。更新提取器会同时运行 Qwen 和确定性规则：
+
+- 规则明确命中的新值、状态、清空和外部动作拥有更高优先级。
+- Qwen 只能补充规则没有覆盖的语义字段。
+- 显式清空只接受规则确认过的清空语言和允许字段，避免模型幻觉造成数据删除。
+- 规则已经识别为纯状态更新时，丢弃模型幻觉出的内容字段。
+- 两路结果仍要通过 Pydantic、类型字段白名单和 MCP 预览。
+
+这使小参数本地模型仍能提供语义覆盖，同时把破坏性错误限制在确认前的候选层。
+
+**状态更新加固**
+
+- MCP 新增只读 `preview_record_status_update`。
+- `update_record_status` 新增强制 `user_confirmed`、`expected_version` 和 `idempotency_key`。
+- 状态按类型限制：
+  - purchase：`active/completed/returned/cancelled`
+  - subscription：`active/cancelled`
+  - bill：`active/paid/cancelled`
+- 状态使提醒失效时，相关 `pending/snoozed` 提醒和记录状态、审计、幂等结果在同一事务中提交。
+- 相关提醒处于 `sending` 时返回 `reminder_in_flight`，整个事务不写入。
+- 恢复 `active` 不会猜测或重建以前取消的提醒。
+
+**工作流**
+
+```text
+sanitized input
+-> extract_target
+-> search_target through MCP
+-> select_target interrupt
+-> extract_update for selected record type
+-> deterministic patch/date conversion
+-> preview_record_update or preview_record_status_update
+-> update_confirmation interrupt
+   -> apply typed corrections: re-preview
+   -> confirm: submit
+-> update_record or update_record_status
+```
+
+**入口和评测**
+
+- Streamlit“我的记录”顶部支持自然语言查找修改，每条记录也有预选目标的自然语言入口。
+- 状态按钮改成预览和确认两阶段，状态选项按记录类型收窄。
+- CLI 新增 `edit`、`edit-resume`、`edit-state`；原 `status` 命令也先预览再确认。
+- `sample_data/update_examples.jsonl` 包含 24 条目标和补丁样例。
+- `eval-updates` 只生成报告，不设置失败阈值。当前 fallback 和本地 Qwen 都是 24/24 case、54/54 field。
+
+**学习重点**
+
+- “模型会调用工具”在安全系统中通常应实现为“模型提出结构化意图，Graph 决定并调用工具”。
+- 先选目标再提取补丁，可以避免模型猜记录 ID，也让第二阶段得到可靠的记录类型约束。
+- 用户确认必须绑定具体版本和具体补丁；版本变化后，旧确认不能继续使用。
+- 状态变化不仅是修改一列，还会改变提醒是否仍然有效，因此属于跨实体事务。
+- 评测不仅衡量模型，也能指导模型与规则的合并边界。
+
+---
+
+## 20. 当前测试体系
+
+当前共有 124 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
 | `test_date_tools.py` | 相对日期、周期锚点、月末和闰年 |
 | `test_fallback_extractor.py` | 规则提取字段 |
 | `test_eval_runner.py` | JSONL 评测加载和报告 |
+| `test_update_eval_runner.py` | 自然语言目标与补丁的 JSONL 评测 |
 | `test_agent.py` | 记录构建和提醒规划 |
 | `test_corrections.py` | 校对白名单、原子性和跨字段校验 |
 | `test_graph_agent.py` | 中断、恢复、路由和旧检查点 |
@@ -783,6 +880,8 @@ record_id + expected_version + changes
 | `test_mcp_boundary.py` | Agent/UI/CLI 不绕过 MCP |
 | `test_repository.py` | SQLite 事务、查询和乐观锁 |
 | `test_record_updates.py` | Patch、提醒重排、幂等、冲突和旧表迁移 |
+| `test_status_updates.py` | 状态白名单、提醒取消、幂等和事务回滚 |
+| `test_update_graph_agent.py` | 自然更新选目标、冻结、纠正、恢复和版本冲突 |
 | `test_audit.py` | 审计事务和隐私允许列表 |
 | `test_worker.py` | 通知、免打扰、失败和周期推进 |
 | `test_app.py` | Streamlit 校对、提醒选择和已保存记录编辑 |
@@ -793,17 +892,20 @@ record_id + expected_version + changes
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m lifevault.cli eval
+python3 -m lifevault.cli eval-updates
+python3 -m lifevault.cli eval-updates --use-qwen
 python3 -m lifevault.cli mcp-smoke
 python3 -m py_compile \
   lifevault/models/schemas.py \
   lifevault/agent/service.py \
   lifevault/agent/graph_agent.py \
+  lifevault/agent/update_graph_agent.py \
   lifevault/records/update_planner.py \
   lifevault/storage/repository.py
 git diff --check
 ```
 
-## 20. 推荐学习顺序
+## 21. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -817,9 +919,10 @@ git diff --check
 ### 第二阶段：理解模型与业务的边界
 
 1. 阅读 `models/llm_factory.py`。
-2. 对比 Qwen Prompt 和 fallback 规则。
-3. 阅读 `eval/runner.py` 和 `sample_data/examples.jsonl`。
-4. 修改一条样例并观察 mismatch 报告。
+2. 阅读 `models/update_extractor.py`，对比两阶段 Prompt、fallback 和合并规则。
+3. 阅读 `eval/runner.py`、`eval/update_runner.py` 和两个 JSONL 样例集。
+4. 分别运行 `eval` 和 `eval-updates --use-qwen`。
+5. 修改一条样例并观察 mismatch 报告。
 
 目标：理解大模型负责模糊理解，评测负责暴露不稳定部分。
 
@@ -829,7 +932,8 @@ git diff --check
 2. 阅读 `agent/graph_agent.py` 的 `_build_graph()`。
 3. 跟踪一个 `missing_fields` 流程。
 4. 跟踪一个校对后查重流程。
-5. 阅读旧检查点兼容测试。
+5. 阅读 `agent/update_graph_agent.py`，跟踪选目标、补丁确认和版本冲突流程。
+6. 阅读旧检查点兼容和更新日期冻结测试。
 
 目标：理解业务逻辑、状态和副作用为什么分层。
 
@@ -841,6 +945,7 @@ git diff --check
 4. 阅读 `test_mcp_boundary.py`。
 5. 对比 Repository 方法和 MCP Tool 的职责。
 6. 跟踪一次 `preview_record_update` 到 `update_record` 的提交过程。
+7. 对比 `preview_record_status_update` 和 `update_record_status` 的事务职责。
 
 目标：理解 MCP 不是数据库 ORM，而是受控能力边界。
 
@@ -853,18 +958,18 @@ git diff --check
 
 目标：理解 Agent 对话结束后，长期任务如何继续可靠运行。
 
-## 21. 用 Git 学习每次迭代
+## 22. 用 Git 学习每次迭代
 
-查看某一版完整提交：
+查看自然语言更新版本的完整实现提交：
 
 ```bash
-git show 8cf4704
+git show e9cace7
 ```
 
 查看两个版本之间的变化：
 
 ```bash
-git diff bbb7ec2..8cf4704
+git diff 8cf4704..e9cace7
 ```
 
 只看某个文件的演进：
@@ -903,19 +1008,20 @@ bf2584c  v0.12 周期提醒
 d0cf075  v0.13 多提醒
 bbb7ec2  v0.14 校对闭环
 8cf4704  v0.15 保存后编辑
+e9cace7  v0.16 自然语言更新
 ```
 
-## 22. 尚未实现的能力
+## 23. 尚未实现的能力
 
 当前明确未实现：
 
 - 已保存记录的类型转换和删除。
-- 通过自然语言直接修改已保存记录。
 - OCR、截图和 PDF 导入。
 - 邮件、微信和云端推送。
 - 云同步和多用户权限。
 - 自动付款、退款或取消订阅。
 - 草稿版本历史与撤销。
+- 多条记录批量更新和跨记录原子操作。
 
 后续版本仍应保持当前迭代方式：
 

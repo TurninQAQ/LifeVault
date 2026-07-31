@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.15 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.16 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 
@@ -15,6 +15,10 @@ natural language -> Qwen/fallback extraction -> LangGraph interrupts
 
 saved record -> MCP update preview -> user confirmation
 -> optimistic-lock update + reminder replan + audit in one SQLite transaction
+
+natural update -> target extraction -> MCP search -> explicit target selection
+-> typed patch extraction -> deterministic date freeze -> MCP preview
+-> user correction/confirmation -> atomic MCP update
 ```
 
 The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
@@ -119,12 +123,31 @@ v0.15 closes the saved-record editing and reminder-consistency loop:
 - Streamlit provides record-type-specific saved-record forms with preview-before-confirmation. CLI supports JSON partial updates and `--dry-run`.
 - Record-type changes, natural-language persisted updates, deletion, OCR/PDF import, and draft history remain out of scope.
 
+v0.16 adds controlled natural-language updates for persisted records:
+
+- A separate `RecordUpdateGraphAgent` handles target search, explicit target selection, patch extraction, preview, structured correction, confirmation, and resumable checkpoints.
+- Qwen runs in two stages: first it proposes search intent without IDs, then it proposes an absolute typed patch after the user selects a record. Deterministic rules constrain explicit values, clearing, status intent, and external-action refusal.
+- The Graph, not the model, calls MCP tools and creates record IDs, versions, confirmation flags, and idempotency keys. Even one search result requires explicit selection unless a per-record UI preselects it.
+- Relative date text is parsed deterministically and frozen in the checkpoint. Only absolute assignments and explicit clears are accepted; arithmetic changes such as “add 10” or “push three days” require clarification.
+- Content changes and status changes are separate operations. Requests to make payments, issue refunds, stop charges, or cancel an external subscription are refused rather than treated as local status changes.
+- Status updates now have `preview_record_status_update`, type-specific status allowlists, explicit confirmation, optimistic locking, idempotency, and atomic cancellation of invalid pending/snoozed reminders.
+- Streamlit supports natural edits globally and from an individual record. CLI adds `edit`, `edit-resume`, and `edit-state`; the existing `status` command now previews before writing.
+- `sample_data/update_examples.jsonl` and `eval-updates` evaluate the target and patch stages. Both fallback and the configured local Qwen pass 24/24 included cases and 54/54 expected fields.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
 - `duplicate_review`: choose `continue` or `cancel`.
 - `record_confirmation`: apply structured `corrections`, then choose `confirm` or `cancel`.
 - `reminder_confirmation`: choose `confirm` or `skip`.
+
+Natural-update interrupts:
+
+- `missing_target`: provide a record name, type, or date clue.
+- `target_not_found`: refine the target search or cancel.
+- `target_selection`: explicitly choose one returned record.
+- `missing_update_details`: provide an absolute new value or explicit clear.
+- `update_confirmation`: apply typed corrections, then confirm or cancel.
 
 ## Local Qwen
 
@@ -135,7 +158,7 @@ LIFEVAULT_QWEN_BASE_URL=http://127.0.0.1:8008/v1
 LIFEVAULT_QWEN_MODEL=qwen-enterprise-agent
 ```
 
-If Qwen is unavailable or returns invalid JSON, the app falls back to a small rules-based extractor so the demo still runs.
+If Qwen is unavailable or returns invalid JSON, the app falls back to a small rules-based extractor. For updates, deterministic matches constrain and safely merge Qwen output instead of allowing model output to override explicit values or destructive-clear rules.
 
 ## Setup
 
@@ -173,9 +196,15 @@ python -m lifevault.cli snooze-reminder REMINDER_ID --at 2026-08-01T09:00:00+08:
 python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"title":"新标题","return_deadline":"2026-08-08"}' --dry-run
 python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"title":"新标题","return_deadline":"2026-08-08"}' --yes
 python -m lifevault.cli update RECORD_ID VERSION --changes-json '{"order_number":"ORDER-100"}' --yes --confirm-duplicate
+python -m lifevault.cli edit "把 ChatGPT Plus 的月费改成 25 美元"
+python -m lifevault.cli edit "下次续费日改到下个月 20 号" --record-id RECORD_ID --yes
+python -m lifevault.cli status RECORD_ID cancelled VERSION --dry-run
+python -m lifevault.cli status RECORD_ID cancelled VERSION --yes
 python -m lifevault.cli worker --once
 python -m lifevault.cli eval
 python -m lifevault.cli eval --json-out eval_report.json
+python -m lifevault.cli eval-updates
+python -m lifevault.cli eval-updates --use-qwen --json-out update_eval_report.json
 ```
 
 Resume an interrupted graph thread:
@@ -186,6 +215,11 @@ python -m lifevault.cli resume THREAD_ID --text "金额是 3499 元，订单号�
 python -m lifevault.cli resume THREAD_ID --corrections-json '{"amount": 3599, "return_days": 14}'
 python -m lifevault.cli resume THREAD_ID --action confirm
 python -m lifevault.cli resume THREAD_ID --action skip
+python -m lifevault.cli edit-state EDIT_THREAD_ID
+python -m lifevault.cli edit-resume EDIT_THREAD_ID --record-id RECORD_ID
+python -m lifevault.cli edit-resume EDIT_THREAD_ID --text "金额改成 25 美元"
+python -m lifevault.cli edit-resume EDIT_THREAD_ID --changes-json '{"amount":25,"currency":"USD"}'
+python -m lifevault.cli edit-resume EDIT_THREAD_ID --action confirm
 ```
 
 ## MCP Server
@@ -217,6 +251,7 @@ list_upcoming_subscriptions
 get_record
 preview_record_update
 update_record
+preview_record_status_update
 get_preferences
 find_duplicate
 update_record_status
@@ -229,7 +264,7 @@ cancel_reminder
 list_audit_logs
 ```
 
-All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `update_record`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. `update_record` also requires `expected_version` and `idempotency_key`; possible duplicate edits require `duplicate_confirmed=true`. The GraphAgent uses an in-process `PersonalVaultMcpClient` for preference reads, duplicate detection, record saves, and atomic reminder-batch creation. The CLI and Streamlit use the same MCP client for vault access; the stdio MCP server remains available for external clients and integration smoke tests. Preference and saved-record updates are host/UI operations and are not part of the model-generated tool plan.
+All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is not exposed as a tool argument. Tool responses use JSON objects with either `ok: true` and data fields or `ok: false` with an error object. `save_record`, `update_record`, `update_record_status`, `create_reminder`, `create_reminders`, `cancel_reminder`, and `update_preferences` require `user_confirmed=true`. Record and status updates also require `expected_version` and `idempotency_key`; possible duplicate content edits require `duplicate_confirmed=true`. The Graph agents use an in-process `PersonalVaultMcpClient`; models only produce candidates and never call write tools or construct authority fields. The CLI and Streamlit use the same MCP client for vault access, while the stdio MCP server remains available for external clients and integration smoke tests.
 
 ## Streamlit
 
@@ -237,7 +272,7 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 python3 -m streamlit run lifevault/app/main.py
 ```
 
-Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports typed saved-record editing with an MCP-computed reminder-impact preview before confirmation.
+Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports typed and natural-language saved-record editing plus two-phase status changes, all with MCP-computed previews before confirmation.
 
 ## Tests
 
@@ -251,7 +286,7 @@ python -m unittest discover -s tests -v
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
 - `lifevault/records`: deterministic persisted-record update and reminder-replan planning.
-- `lifevault/agent`: LangGraph create-record workflow plus the v0.1 service fallback.
+- `lifevault/agent`: independent LangGraph create-record and natural-update workflows.
 - `lifevault/mcp_server`: FastMCP stdio server, in-process MCP client, and smoke client.
 - `lifevault/app`: Streamlit UI.
 - `lifevault/worker`: reminder scanner and notification sender.
