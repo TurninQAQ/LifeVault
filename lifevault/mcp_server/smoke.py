@@ -270,10 +270,26 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     {"reminder_id": child_reminder_id, "user_confirmed": True},
                 )
                 require_ok("cancel_reminder", accepted_cancel)
+                status_preview = await call_json(
+                    session,
+                    "preview_record_status_update",
+                    {
+                        "record_id": record_id,
+                        "new_status": "completed",
+                        "expected_version": 2,
+                    },
+                )
+                require_ok("preview_record_status_update", status_preview)
                 update_status_result = await call_json(
                     session,
                     "update_record_status",
-                    {"record_id": record_id, "new_status": "completed", "expected_version": 2},
+                    {
+                        "record_id": record_id,
+                        "new_status": "completed",
+                        "expected_version": 2,
+                        "idempotency_key": f"mcp-smoke-status-{run_id}",
+                        "user_confirmed": True,
+                    },
                 )
                 require_ok("update_record_status", update_status_result)
                 audit_result = await call_json(session, "list_audit_logs", {"limit": 100})
@@ -306,6 +322,7 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "batch_reminder_count": len(batch_reminders["reminders"]),
                     "rejected_cancel": rejected_cancel,
                     "accepted_cancel": accepted_cancel,
+                    "status_preview_version": status_preview["record"]["version"],
                     "updated_record_status": update_status_result["record"]["status"],
                     "audit_count": len(audit_logs),
                     "audit_rejected_count": sum(log["result"] == "rejected" for log in audit_logs),

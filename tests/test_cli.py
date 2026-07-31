@@ -15,6 +15,71 @@ from lifevault.storage.repository import VaultRepository
 
 
 class CliCorrectionTest(unittest.TestCase):
+    def test_natural_edit_and_status_commands_require_confirmed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "cli-natural.db"
+            graph_path = Path(tmp) / "cli-natural-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type="bill",
+                    title="房租",
+                    amount=3000,
+                    details={"bill_name": "房租"},
+                ),
+                "cli-natural-record",
+            )
+            environment = {
+                **os.environ,
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            natural = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "lifevault.cli",
+                    "edit",
+                    "金额改成 3200 元",
+                    "--record-id",
+                    record.id,
+                    "--yes",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(natural.returncode, 0, natural.stderr)
+            self.assertIn("Status: completed", natural.stdout)
+            self.assertEqual(repo.get_record("local", record.id).amount, 3200)
+
+            status = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "lifevault.cli",
+                    "status",
+                    record.id,
+                    "paid",
+                    "2",
+                    "--yes",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("to paid, version=3", status.stdout)
+            self.assertEqual(repo.get_record("local", record.id).status.value, "paid")
+
     def test_resume_accepts_structured_corrections_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database_path = Path(tmp) / "cli.db"

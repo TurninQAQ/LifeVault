@@ -176,7 +176,19 @@ class McpClientTest(unittest.TestCase):
             self.assertTrue(cancelled["ok"])
             self.assertEqual(cancelled["reminder"]["status"], "cancelled")
 
-            updated = client.update_record_status(record_id, "completed", expected_version=1)
+            preview = client.preview_record_status_update(
+                record_id,
+                "completed",
+                expected_version=1,
+            )
+            self.assertTrue(preview["ok"])
+            updated = client.update_record_status(
+                record_id,
+                "completed",
+                expected_version=1,
+                idempotency_key="client-status-update",
+                user_confirmed=True,
+            )
             self.assertTrue(updated["ok"])
             self.assertEqual(updated["record"]["status"], "completed")
 
@@ -199,6 +211,8 @@ class McpClientTest(unittest.TestCase):
                 saved["record"]["id"],
                 "completed",
                 expected_version=99,
+                idempotency_key="PRIVATE-STATUS-KEY",
+                user_confirmed=True,
             )
             self.assertFalse(failed_update["ok"])
             rejected_reminder = client.create_reminder(

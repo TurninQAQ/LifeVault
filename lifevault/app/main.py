@@ -9,26 +9,41 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from lifevault.agent.graph_agent import GraphAgent
+from lifevault.agent.update_graph_agent import RecordUpdateGraphAgent
 from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
-from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
+from lifevault.models.schemas import (
+    GraphTurn,
+    RecordUpdateTurn,
+    ReminderStatus,
+)
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.idempotency import stable_key
 
 
 st.set_page_config(page_title="LifeVault", page_icon="LV", layout="wide")
 
+RECORD_STATUS_OPTIONS = {
+    "purchase": ["active", "completed", "returned", "cancelled"],
+    "subscription": ["active", "cancelled"],
+    "bill": ["active", "paid", "cancelled"],
+}
+
 
 @st.cache_resource
-def get_services() -> tuple[GraphAgent, PersonalVaultMcpClient]:
+def get_services() -> tuple[GraphAgent, RecordUpdateGraphAgent, PersonalVaultMcpClient]:
     settings = get_settings()
     repository = VaultRepository(settings.database_path)
     mcp_client = InProcessPersonalVaultMcpClient(settings, repository)
-    return GraphAgent(settings, repository, mcp_client=mcp_client), mcp_client
+    return (
+        GraphAgent(settings, repository, mcp_client=mcp_client),
+        RecordUpdateGraphAgent(settings, repository, mcp_client=mcp_client),
+        mcp_client,
+    )
 
 
 def main() -> None:
-    agent, mcp_client = get_services()
+    agent, update_agent, mcp_client = get_services()
     settings = get_settings()
 
     st.title("LifeVault")
@@ -40,7 +55,7 @@ def main() -> None:
         render_add_record(agent)
 
     with tab_records:
-        render_records(mcp_client)
+        render_records(update_agent, mcp_client)
 
     with tab_reminders:
         render_reminders(mcp_client, settings.default_timezone)
@@ -693,10 +708,245 @@ def _render_field_errors(turn: GraphTurn, field: str) -> None:
         st.error(message)
 
 
-def render_records(mcp_client: PersonalVaultMcpClient) -> None:
+def render_natural_record_update(agent: RecordUpdateGraphAgent) -> None:
+    st.subheader("自然语言修改")
+    cols = st.columns([5, 1])
+    text = cols[0].text_input(
+        "修改描述",
+        placeholder="例如：把 ChatGPT Plus 的月费改成 25 美元。",
+        key="natural_record_update_text",
+    )
+    if cols[1].button("查找记录", type="primary", key="natural_record_update_start"):
+        if text.strip():
+            st.session_state["natural_update_turn"] = agent.start(text)
+            st.rerun()
+
+    turn = st.session_state.get("natural_update_turn")
+    if not isinstance(turn, RecordUpdateTurn):
+        return
+    st.caption(f"thread_id: {turn.thread_id}")
+    for warning in turn.warnings:
+        st.warning(warning)
+    for error in turn.errors:
+        st.error(error)
+
+    if turn.status == "completed":
+        if turn.no_changes:
+            st.info("记录已经是目标值，没有执行写入。")
+        else:
+            st.success("记录更新完成。")
+        if st.button("开始另一项修改", key=f"natural_reset_{turn.thread_id}"):
+            st.session_state.pop("natural_update_turn", None)
+            st.rerun()
+        return
+    if turn.status == "cancelled":
+        if st.button("清除已取消流程", key=f"natural_cancelled_{turn.thread_id}"):
+            st.session_state.pop("natural_update_turn", None)
+            st.rerun()
+        return
+
+    if turn.interrupt_type in {"missing_target", "target_not_found", "missing_update_details"}:
+        st.warning(turn.prompt or "请补充信息。")
+        supplement = st.text_input(
+            "补充内容",
+            key=f"natural_supplement_{turn.thread_id}_{turn.interrupt_type}",
+        )
+        supplement_actions = st.columns([1, 1, 4])
+        if supplement_actions[0].button("提交补充", type="primary", key=f"natural_supply_{turn.thread_id}"):
+            if supplement.strip():
+                st.session_state["natural_update_turn"] = agent.resume(
+                    turn.thread_id,
+                    {"text": supplement},
+                )
+                st.rerun()
+        if supplement_actions[1].button("取消", key=f"natural_supply_cancel_{turn.thread_id}"):
+            st.session_state["natural_update_turn"] = agent.resume(
+                turn.thread_id,
+                {"action": "cancel"},
+            )
+            st.rerun()
+        return
+
+    if turn.interrupt_type == "target_selection":
+        options = [candidate["id"] for candidate in turn.candidates]
+        labels = {
+            candidate["id"]: (
+                f"{candidate.get('title') or '-'} · {candidate.get('record_type')} · "
+                f"{candidate.get('status')} · v{candidate.get('version')}"
+            )
+            for candidate in turn.candidates
+        }
+        selected = st.radio(
+            "目标记录",
+            options=options,
+            format_func=lambda value: labels[value],
+            key=f"natural_target_{turn.thread_id}",
+        )
+        target_actions = st.columns([1, 1, 4])
+        if target_actions[0].button("选择记录", type="primary", key=f"natural_select_{turn.thread_id}"):
+            st.session_state["natural_update_turn"] = agent.resume(
+                turn.thread_id,
+                {"record_id": selected},
+            )
+            st.rerun()
+        if target_actions[1].button("取消", key=f"natural_target_cancel_{turn.thread_id}"):
+            st.session_state["natural_update_turn"] = agent.resume(
+                turn.thread_id,
+                {"action": "cancel"},
+            )
+            st.rerun()
+        return
+
+    if turn.interrupt_type == "update_confirmation":
+        _render_natural_update_confirmation(agent, turn)
+
+
+def _render_natural_update_confirmation(
+    agent: RecordUpdateGraphAgent,
+    turn: RecordUpdateTurn,
+) -> None:
+    record = turn.record or {}
+    st.write(
+        f"目标：**{record.get('title') or '-'}** · {record.get('record_type')} · "
+        f"{record.get('status')} · v{record.get('version')}"
+    )
+    if turn.preview:
+        st.caption(
+            f"将取消 {turn.preview.get('cancelled_reminder_count', 0)} 个提醒，"
+            f"创建 {turn.preview.get('created_reminder_count', 0)} 个替代提醒。"
+        )
+    for field, messages in turn.field_errors.items():
+        for message in messages:
+            st.error(f"{field}: {message}")
+
+    if turn.target_status:
+        record_type = record.get("record_type")
+        status_options = RECORD_STATUS_OPTIONS.get(record_type, [turn.target_status])
+        corrected_status = st.selectbox(
+            "目标状态",
+            status_options,
+            index=status_options.index(turn.target_status),
+            key=f"natural_status_correction_{turn.thread_id}_{record.get('version')}",
+        )
+        dirty = corrected_status != turn.target_status
+        corrected_changes: dict[str, Any] | None = None
+    else:
+        corrected_changes = _natural_change_inputs(turn)
+        corrected_status = None
+        dirty = corrected_changes != turn.changes
+
+    actions = st.columns([1, 1, 1, 3])
+    if actions[0].button(
+        "应用修改",
+        disabled=not dirty,
+        key=f"natural_apply_{turn.thread_id}",
+    ):
+        payload: dict[str, Any] = {"action": "apply"}
+        if corrected_status is not None:
+            payload["target_status"] = corrected_status
+        else:
+            payload["changes"] = corrected_changes or {}
+        st.session_state["natural_update_turn"] = agent.resume(turn.thread_id, payload)
+        st.rerun()
+    if actions[1].button(
+        "确认更新",
+        type="primary",
+        disabled=dirty or bool(turn.field_errors),
+        key=f"natural_confirm_{turn.thread_id}",
+    ):
+        st.session_state["natural_update_turn"] = agent.resume(
+            turn.thread_id,
+            {"action": "confirm"},
+        )
+        st.rerun()
+    if actions[2].button("取消", key=f"natural_confirm_cancel_{turn.thread_id}"):
+        st.session_state["natural_update_turn"] = agent.resume(
+            turn.thread_id,
+            {"action": "cancel"},
+        )
+        st.rerun()
+
+
+def _natural_change_inputs(turn: RecordUpdateTurn) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    revision = hashlib.sha256(
+        json.dumps(turn.changes, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:10]
+    date_fields = {
+        "event_date",
+        "return_deadline",
+        "warranty_deadline",
+        "next_renewal_date",
+        "due_date",
+    }
+    for field, value in turn.changes.items():
+        key = f"natural_change_{turn.thread_id}_{revision}_{field}"
+        if value is None:
+            st.checkbox(f"清空 {field}", value=True, disabled=True, key=key)
+            changes[field] = None
+        elif field in date_fields:
+            changes[field] = _date_value(
+                st.date_input(field, value=_as_date(value), format="YYYY-MM-DD", key=key)
+            )
+        elif field == "amount":
+            changes[field] = st.number_input(field, min_value=0.0, value=float(value), key=key)
+        elif field == "auto_renew":
+            changes[field] = st.toggle(field, value=bool(value), key=key)
+        elif field == "billing_cycle":
+            options = ["monthly", "yearly", "weekly", "unknown"]
+            changes[field] = st.selectbox(field, options, index=options.index(value), key=key)
+        elif field == "notes":
+            changes[field] = st.text_area(field, value=str(value), max_chars=1000, key=key).strip() or None
+        else:
+            changes[field] = st.text_input(field, value=str(value), key=key).strip() or None
+    return changes
+
+
+def render_record_status_preview(mcp_client: PersonalVaultMcpClient) -> None:
+    state = st.session_state.get("record_status_preview")
+    if not isinstance(state, dict):
+        return
+    preview = state.get("preview") or {}
+    proposed = preview.get("record") or {}
+    st.divider()
+    st.subheader("状态修改预览")
+    st.write(
+        f"{proposed.get('title') or '-'}：{preview.get('current_record', {}).get('status')}"
+        f" → **{proposed.get('status')}**"
+    )
+    reminders = preview.get("reminders_to_cancel") or []
+    st.caption(f"将取消 {len(reminders)} 个失效提醒。")
+    actions = st.columns([1, 1, 4])
+    if actions[0].button("确认状态更新", type="primary", key="confirm_record_status_update"):
+        result = mcp_client.update_record_status(
+            state["record_id"],
+            state["new_status"],
+            state["expected_version"],
+            state["idempotency_key"],
+            user_confirmed=True,
+        )
+        if render_mcp_error("update_record_status", result):
+            st.session_state["record_update_notice"] = (
+                f"状态已更新为 {result['record']['status']}，"
+                f"取消 {len(result.get('cancelled_reminders') or [])} 个提醒。"
+            )
+            st.session_state.pop("record_status_preview", None)
+            st.rerun()
+    if actions[1].button("取消状态更新", key="cancel_record_status_update"):
+        st.session_state.pop("record_status_preview", None)
+        st.rerun()
+
+
+def render_records(
+    update_agent: RecordUpdateGraphAgent,
+    mcp_client: PersonalVaultMcpClient,
+) -> None:
     notice = st.session_state.pop("record_update_notice", None)
     if isinstance(notice, str):
         st.success(notice)
+
+    render_natural_record_update(update_agent)
+    st.divider()
 
     query = st.text_input("关键词", key="record_query")
     result = mcp_client.search_records(query=query or None)
@@ -724,21 +974,64 @@ def render_records(mcp_client: PersonalVaultMcpClient) -> None:
                     "保修截止："
                     f"{details.get('warranty_deadline') or '-'}"
                 )
-            actions = st.columns([2, 1, 1])
+            actions = st.columns([2, 1, 1, 1])
             status = actions[0].selectbox(
                 "状态",
-                options=[item.value for item in RecordStatus],
-                index=[item.value for item in RecordStatus].index(record["status"]),
+                options=RECORD_STATUS_OPTIONS[record["record_type"]],
+                index=RECORD_STATUS_OPTIONS[record["record_type"]].index(record["status"]),
                 key=f"status_{record['id']}",
             )
             if actions[1].button("更新状态", key=f"update_{record['id']}"):
-                update_result = mcp_client.update_record_status(record["id"], status, record["version"])
-                if render_mcp_error("update_record_status", update_result):
+                preview_result = mcp_client.preview_record_status_update(
+                    record["id"],
+                    status,
+                    record["version"],
+                )
+                if render_mcp_error("preview_record_status_update", preview_result):
+                    st.session_state["record_status_preview"] = {
+                        "record_id": record["id"],
+                        "new_status": status,
+                        "expected_version": record["version"],
+                        "preview": preview_result,
+                        "idempotency_key": stable_key(
+                            "streamlit-record-status-update",
+                            record["id"],
+                            record["version"],
+                            status,
+                        ),
+                    }
                     st.rerun()
             if actions[2].button("编辑", key=f"edit_{record['id']}"):
                 st.session_state["editing_record_id"] = record["id"]
                 st.session_state.pop("record_update_preview", None)
                 st.rerun()
+            if actions[3].button("自然语言编辑", key=f"natural_edit_{record['id']}"):
+                st.session_state["natural_edit_record_id"] = record["id"]
+                st.rerun()
+
+    render_record_status_preview(mcp_client)
+
+    natural_edit_record_id = st.session_state.get("natural_edit_record_id")
+    if isinstance(natural_edit_record_id, str):
+        st.divider()
+        st.subheader("自然语言编辑选中记录")
+        natural_text = st.text_area(
+            "修改要求",
+            placeholder="例如：金额改成 25 美元，下次续费日改到下个月 15 号。",
+            key=f"natural_edit_text_{natural_edit_record_id}",
+        )
+        natural_actions = st.columns([1, 1, 4])
+        if natural_actions[0].button("生成修改预览", type="primary"):
+            if natural_text.strip():
+                turn = update_agent.start(
+                    natural_text,
+                    preselected_record_id=natural_edit_record_id,
+                )
+                st.session_state["natural_update_turn"] = turn
+                st.rerun()
+        if natural_actions[1].button("关闭自然语言编辑"):
+            st.session_state.pop("natural_edit_record_id", None)
+            st.rerun()
 
     editing_record_id = st.session_state.get("editing_record_id")
     if not isinstance(editing_record_id, str):

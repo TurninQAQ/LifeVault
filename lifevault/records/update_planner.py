@@ -11,6 +11,7 @@ from lifevault.models.schemas import (
     RecordType,
     RecordUpdatePatch,
     RecordUpdatePreview,
+    RecordStatusUpdatePreview,
     Reminder,
     ReminderCreate,
     ReminderStatus,
@@ -45,6 +46,22 @@ TYPED_REMINDER_TYPES = {
     ),
     RecordType.SUBSCRIPTION: frozenset({ReminderType.RENEWAL}),
     RecordType.BILL: frozenset({ReminderType.BILL_DUE}),
+}
+ALLOWED_STATUSES_BY_TYPE = {
+    RecordType.PURCHASE: frozenset(
+        {
+            RecordStatus.ACTIVE,
+            RecordStatus.COMPLETED,
+            RecordStatus.RETURNED,
+            RecordStatus.CANCELLED,
+        }
+    ),
+    RecordType.SUBSCRIPTION: frozenset(
+        {RecordStatus.ACTIVE, RecordStatus.CANCELLED}
+    ),
+    RecordType.BILL: frozenset(
+        {RecordStatus.ACTIVE, RecordStatus.PAID, RecordStatus.CANCELLED}
+    ),
 }
 DATE_FIELDS_BY_REMINDER = {
     ReminderType.RETURN_DEADLINE: "return_deadline",
@@ -180,6 +197,56 @@ def plan_record_update(
 
 def update_needs_duplicate_confirmation(changed_fields: list[str]) -> bool:
     return bool(set(changed_fields) & DUPLICATE_FIELDS)
+
+
+def plan_record_status_update(
+    current: LifeRecord,
+    new_status: RecordStatus,
+    reminders: list[Reminder],
+    now: datetime,
+) -> RecordStatusUpdatePreview:
+    if new_status not in ALLOWED_STATUSES_BY_TYPE[current.record_type]:
+        raise RecordUpdateError(
+            "invalid_status",
+            f"{new_status.value} is not valid for {current.record_type.value} records.",
+            field_errors={"new_status": ["Status is not valid for this record type."]},
+        )
+    if new_status == current.status:
+        raise RecordUpdateError(
+            "no_changes",
+            "The record already has the requested status.",
+        )
+
+    affected = [
+        reminder
+        for reminder in reminders
+        if not _record_allows_reminder(
+            current.record_type,
+            new_status,
+            reminder.reminder_type,
+        )
+    ]
+    if any(reminder.status == ReminderStatus.SENDING for reminder in affected):
+        raise RecordUpdateError(
+            "reminder_in_flight",
+            "A reminder invalidated by this status update is currently being sent.",
+        )
+    reminders_to_cancel = [
+        reminder
+        for reminder in affected
+        if reminder.status in {ReminderStatus.PENDING, ReminderStatus.SNOOZED}
+    ]
+    return RecordStatusUpdatePreview(
+        current_record=current,
+        record=current.model_copy(
+            update={
+                "status": new_status,
+                "version": current.version + 1,
+                "updated_at": now.astimezone(timezone.utc),
+            }
+        ),
+        reminders_to_cancel=reminders_to_cancel,
+    )
 
 
 def _apply_patch(current: LifeRecord, patch: RecordUpdatePatch) -> LifeRecord:

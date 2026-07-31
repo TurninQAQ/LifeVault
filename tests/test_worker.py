@@ -164,20 +164,31 @@ class ReminderWorkerTest(unittest.TestCase):
             settings, repo = make_repo(tmp)
             now = aware_now()
             record_id, reminder_id = create_due_reminder(repo, now)
-            repo.update_record_status(settings.default_user_id, record_id, RecordStatus.COMPLETED, expected_version=1)
+            status_result = repo.update_record_status(
+                settings.default_user_id,
+                record_id,
+                RecordStatus.COMPLETED,
+                expected_version=1,
+                idempotency_key="complete-before-worker",
+                now=now,
+            )
             desktop = RecordingProvider()
             worker = ReminderWorker(settings, repo, desktop_provider=desktop, console_provider=RecordingProvider())
 
             processed = worker.run_once(now)
 
             reminder = repo.get_reminder(settings.default_user_id, reminder_id)
-            self.assertEqual(processed, 1)
+            self.assertEqual(len(status_result.cancelled_reminders), 1)
+            self.assertEqual(processed, 0)
             self.assertEqual(reminder.status, ReminderStatus.CANCELLED)
             self.assertEqual(desktop.calls, [])
-            audit = repo.list_audit_logs(settings.default_user_id, action="cancel_reminder")
-            self.assertEqual(audit[0].actor, "worker")
-            self.assertEqual(audit[0].target_id, reminder_id)
-            self.assertIn('"record_status": "completed"', audit[0].params_summary or "")
+            audit = repo.list_audit_logs(
+                settings.default_user_id,
+                action="update_record_status",
+            )
+            self.assertEqual(audit[0].actor, "user")
+            self.assertEqual(audit[0].target_id, record_id)
+            self.assertIn('"new_status": "completed"', audit[0].params_summary or "")
 
     def test_completed_purchase_still_sends_warranty_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

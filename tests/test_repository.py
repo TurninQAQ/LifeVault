@@ -254,6 +254,14 @@ class RepositoryTest(unittest.TestCase):
 
             self.assertEqual([item.id for item in records], [record.id])
 
+            event_records = repo.search_records(
+                "local",
+                record_types=[RecordType.PURCHASE],
+                date_from=date(2026, 7, 25),
+                date_to=date(2026, 7, 25),
+            )
+            self.assertEqual([item.id for item in event_records], [record.id])
+
 
 if __name__ == "__main__":
     unittest.main()

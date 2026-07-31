@@ -303,8 +303,60 @@ def create_server(
         except (ValidationError, ValueError) as exc:
             return _fail("find_duplicate_failed", str(exc))
 
-    @mcp.tool(description="Update a record status with optimistic locking.")
-    def update_record_status(record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
+    @mcp.tool(description="Preview a typed record status update without writing.")
+    def preview_record_status_update(
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        try:
+            parsed_status = RecordStatus(new_status)
+        except ValueError as exc:
+            return _fail("invalid_status", str(exc))
+        try:
+            preview = repo.preview_record_status_update(
+                user_id,
+                record_id,
+                parsed_status,
+                expected_version,
+                now_in_timezone(active_settings.default_timezone),
+            )
+            return _ok(**preview.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            return _record_update_failure(exc)
+        except Exception:
+            return _fail("preview_record_status_update_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Update a record status atomically after explicit confirmation.")
+    def update_record_status(
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+        idempotency_key: str = "",
+        user_confirmed: bool = False,
+    ) -> dict[str, Any]:
+        audit_params = {"new_status": new_status}
+        if not user_confirmed:
+            audit_mcp_failure(
+                "update_record_status",
+                "rejected",
+                "confirmation_required",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail(
+                "confirmation_required",
+                "Updating record status requires user_confirmed=true.",
+            )
+        if not idempotency_key:
+            audit_mcp_failure(
+                "update_record_status",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=record_id,
+                params=audit_params,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
         try:
             parsed_status = RecordStatus(new_status)
         except ValueError as exc:
@@ -313,33 +365,42 @@ def create_server(
                 "rejected",
                 "invalid_status",
                 target_id=record_id,
+                params=audit_params,
             )
-            return _fail("update_record_status_failed", str(exc))
+            return _fail("invalid_status", str(exc))
         try:
-            updated = repo.update_record_status(
+            result = repo.update_record_status(
                 user_id,
                 record_id,
                 parsed_status,
                 expected_version=expected_version,
+                idempotency_key=idempotency_key,
+                now=now_in_timezone(active_settings.default_timezone),
                 actor="mcp",
             )
-            return _ok(record=_model(updated))
-        except ValueError as exc:
-            audit_mcp_failure(
-                "update_record_status",
-                "failed",
-                "record_conflict_or_not_found",
-                target_id=record_id,
-                params={"new_status": new_status},
-            )
-            return _fail("update_record_status_failed", str(exc))
+            return _ok(**result.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            if exc.code != "no_changes":
+                result_type = (
+                    "failed"
+                    if exc.code in {"version_conflict", "reminder_in_flight", "idempotency_conflict"}
+                    else "rejected"
+                )
+                audit_mcp_failure(
+                    "update_record_status",
+                    result_type,
+                    exc.code,
+                    target_id=record_id,
+                    params=audit_params,
+                )
+            return _record_update_failure(exc)
         except Exception:
             audit_mcp_failure(
                 "update_record_status",
                 "failed",
                 "internal_error",
                 target_id=record_id,
-                params={"new_status": new_status},
+                params=audit_params,
             )
             return _fail("update_record_status_failed", "Tool execution failed.")
 

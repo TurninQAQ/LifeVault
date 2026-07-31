@@ -76,6 +76,19 @@ CREATE TABLE IF NOT EXISTS record_update_operations (
 CREATE INDEX IF NOT EXISTS idx_record_update_operations_record
 ON record_update_operations(user_id, record_id);
 
+CREATE TABLE IF NOT EXISTS record_status_update_operations (
+    user_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    record_id TEXT NOT NULL REFERENCES life_records(id),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_record_status_update_operations_record
+ON record_status_update_operations(user_id, record_id);
+
 CREATE TABLE IF NOT EXISTS user_preferences (
     user_id TEXT PRIMARY KEY,
     default_time TEXT NOT NULL,

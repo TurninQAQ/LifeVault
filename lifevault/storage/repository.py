@@ -13,6 +13,8 @@ from lifevault.models.schemas import (
     LifeRecord,
     LifeRecordCreate,
     RecordStatus,
+    RecordStatusUpdatePreview,
+    RecordStatusUpdateResult,
     RecordType,
     RecordUpdatePatch,
     RecordUpdatePreview,
@@ -29,6 +31,7 @@ from lifevault.models.schemas import (
 from lifevault.records.update_planner import (
     RecordUpdateError,
     plan_record_update,
+    plan_record_status_update,
     update_needs_duplicate_confirmation,
 )
 from lifevault.storage.database import connect, init_db
@@ -247,6 +250,7 @@ class VaultRepository:
             params.extend(record_type.value for record_type in record_types)
         if date_from or date_to:
             date_expressions = [
+                "event_date",
                 "deadline",
                 "json_extract(details_json, '$.return_deadline')",
                 "json_extract(details_json, '$.warranty_deadline')",
@@ -853,26 +857,119 @@ class VaultRepository:
             )
             return result
 
+    def preview_record_status_update(
+        self,
+        user_id: str,
+        record_id: str,
+        new_status: RecordStatus,
+        expected_version: int,
+        now: datetime,
+    ) -> RecordStatusUpdatePreview:
+        with connect(self.database_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            if not row:
+                raise RecordUpdateError("record_not_found", "Record not found.")
+            current = self._row_to_record(row)
+            if current.version != expected_version:
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=current,
+                )
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            return plan_record_status_update(current, new_status, reminders, now)
+
     def update_record_status(
         self,
         user_id: str,
         record_id: str,
         new_status: RecordStatus,
         expected_version: int,
+        idempotency_key: str,
+        now: datetime,
         actor: str = "user",
-    ) -> LifeRecord:
+    ) -> RecordStatusUpdateResult:
+        request_hash = stable_key(
+            "record-status-update-request",
+            user_id,
+            record_id,
+            new_status.value,
+            expected_version,
+        )
         with connect(self.database_path) as conn:
-            now = _utc_now().isoformat()
+            conn.execute("BEGIN IMMEDIATE")
+            operation = conn.execute(
+                """
+                SELECT request_hash, result_json
+                FROM record_status_update_operations
+                WHERE user_id = ? AND idempotency_key = ?
+                """,
+                (user_id, idempotency_key),
+            ).fetchone()
+            if operation:
+                if operation["request_hash"] != request_hash:
+                    raise RecordUpdateError(
+                        "idempotency_conflict",
+                        "idempotency_key was already used for a different status update.",
+                    )
+                return RecordStatusUpdateResult.model_validate_json(operation["result_json"])
+
+            row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            if not row:
+                raise RecordUpdateError("record_not_found", "Record not found.")
+            current = self._row_to_record(row)
+            if current.version != expected_version:
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=current,
+                )
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            preview = plan_record_status_update(current, new_status, reminders, now)
+            updated_at = preview.record.updated_at.isoformat()
             cursor = conn.execute(
                 """
                 UPDATE life_records
                 SET status = ?, version = version + 1, updated_at = ?
                 WHERE user_id = ? AND id = ? AND version = ?
                 """,
-                (new_status.value, now, user_id, record_id, expected_version),
+                (new_status.value, updated_at, user_id, record_id, expected_version),
             )
             if cursor.rowcount != 1:
-                raise ValueError("Record version conflict or record not found.")
+                raise RecordUpdateError("version_conflict", "Record version conflict.")
+
+            reminder_ids = [reminder.id for reminder in preview.reminders_to_cancel]
+            if reminder_ids:
+                placeholders = ",".join("?" for _ in reminder_ids)
+                conn.execute(
+                    f"""
+                    UPDATE reminders
+                    SET status = ?, updated_at = ?
+                    WHERE user_id = ? AND id IN ({placeholders}) AND status IN (?, ?)
+                    """,
+                    [
+                        ReminderStatus.CANCELLED.value,
+                        updated_at,
+                        user_id,
+                        *reminder_ids,
+                        ReminderStatus.PENDING.value,
+                        ReminderStatus.SNOOZED.value,
+                    ],
+                )
+
+            cancelled_rows = [
+                conn.execute(
+                    "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                    (user_id, reminder_id),
+                ).fetchone()
+                for reminder_id in reminder_ids
+            ]
             self._audit_conn(
                 conn,
                 user_id=user_id,
@@ -880,10 +977,45 @@ class VaultRepository:
                 action="update_record_status",
                 target_id=record_id,
                 result="ok",
-                params={"new_status": new_status.value},
+                params={
+                    "new_status": new_status.value,
+                    "old_version": expected_version,
+                    "new_version": expected_version + 1,
+                    "cancelled_reminder_count": len(cancelled_rows),
+                    "reminder_types": sorted(
+                        {row["reminder_type"] for row in cancelled_rows if row is not None}
+                    ),
+                },
             )
-            row = conn.execute("SELECT * FROM life_records WHERE id = ?", (record_id,)).fetchone()
-            return self._row_to_record(row)
+            updated_row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            result = RecordStatusUpdateResult(
+                record=self._row_to_record(updated_row),
+                cancelled_reminders=[
+                    self._row_to_reminder(row)
+                    for row in cancelled_rows
+                    if row is not None
+                ],
+                warnings=preview.warnings,
+            )
+            conn.execute(
+                """
+                INSERT INTO record_status_update_operations(
+                    user_id, idempotency_key, request_hash, record_id, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    idempotency_key,
+                    request_hash,
+                    record_id,
+                    result.model_dump_json(),
+                    updated_at,
+                ),
+            )
+            return result
 
     def _list_record_reminders_conn(
         self,

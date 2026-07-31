@@ -352,6 +352,117 @@ class RecordUpdatePatch(BaseModel):
         return value
 
 
+class RecordTargetQuery(BaseModel):
+    """Model-produced target search intent. It never contains a record id."""
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    operation: Literal["content_update", "status_update", "external_action", "unknown"] = "unknown"
+    record_type: RecordType | None = None
+    query: str | None = None
+    target_date_text: str | None = None
+
+    @field_validator("query", "target_date_text", mode="before")
+    @classmethod
+    def normalize_search_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+
+RECORD_UPDATE_CLEAR_FIELDS = frozenset(
+    {
+        "event_date",
+        "notes",
+        "merchant",
+        "order_number",
+        "return_deadline",
+        "warranty_deadline",
+        "service_name",
+        "billing_cycle",
+        "next_renewal_date",
+        "auto_renew",
+        "bill_name",
+        "billing_period",
+        "due_date",
+    }
+)
+
+
+class NaturalRecordUpdateIntent(BaseModel):
+    """Model-produced absolute update values for a user-selected record type."""
+
+    model_config = ConfigDict(
+        extra="ignore",
+        str_strip_whitespace=True,
+        allow_inf_nan=False,
+    )
+
+    operation: Literal["content_update", "status_update", "external_action", "unknown"] = "unknown"
+    title: str | None = None
+    amount: float | None = Field(default=None, ge=0)
+    currency: str | None = None
+    event_date_text: str | None = None
+    notes: str | None = None
+
+    merchant: str | None = None
+    order_number: str | None = None
+    return_deadline_text: str | None = None
+    warranty_deadline_text: str | None = None
+
+    service_name: str | None = None
+    billing_cycle: Literal["monthly", "yearly", "weekly", "unknown"] | None = None
+    next_renewal_text: str | None = None
+    auto_renew: StrictBool | None = None
+
+    bill_name: str | None = None
+    billing_period: str | None = None
+    due_date_text: str | None = None
+    target_status: RecordStatus | None = None
+    clear_fields: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "title",
+        "notes",
+        "merchant",
+        "order_number",
+        "service_name",
+        "bill_name",
+        "billing_period",
+        "event_date_text",
+        "return_deadline_text",
+        "warranty_deadline_text",
+        "next_renewal_text",
+        "due_date_text",
+        mode="before",
+    )
+    @classmethod
+    def normalize_update_text(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_update_currency(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            raise ValueError("Currency must be a three-letter code.")
+        return normalized
+
+    @field_validator("clear_fields")
+    @classmethod
+    def validate_clear_fields(cls, value: list[str]) -> list[str]:
+        invalid = sorted(set(value) - RECORD_UPDATE_CLEAR_FIELDS)
+        if invalid:
+            raise ValueError(f"Fields cannot be cleared: {', '.join(invalid)}")
+        return list(dict.fromkeys(value))
+
+
 class ReminderCreate(BaseModel):
     record_id: str
     scheduled_at: datetime
@@ -429,6 +540,19 @@ class RecordUpdateResult(BaseModel):
     duplicate_candidates: list[DuplicateCandidate] = Field(default_factory=list)
 
 
+class RecordStatusUpdatePreview(BaseModel):
+    current_record: LifeRecord
+    record: LifeRecord
+    reminders_to_cancel: list[Reminder] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RecordStatusUpdateResult(BaseModel):
+    record: LifeRecord
+    cancelled_reminders: list[Reminder] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class DraftResult(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid4()))
     raw_input: str
@@ -487,6 +611,26 @@ class GraphTurn(BaseModel):
     def normalize_reminders(cls, value: Any) -> Any:
         normalized = _normalize_plural_fields(value, "reminders", "reminder")
         return _normalize_plural_fields(normalized, "reminder_ids", "reminder_id")
+
+
+class RecordUpdateTurn(BaseModel):
+    thread_id: str
+    status: Literal["running", "interrupted", "completed", "cancelled"]
+    interrupt_type: str | None = None
+    prompt: str | None = None
+    interrupt_payload: dict[str, Any] | None = None
+    target_query: dict[str, Any] | None = None
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    selected_record_id: str | None = None
+    record: dict[str, Any] | None = None
+    changes: dict[str, Any] = Field(default_factory=dict)
+    target_status: str | None = None
+    preview: dict[str, Any] | None = None
+    updated_record_id: str | None = None
+    no_changes: bool = False
+    field_errors: dict[str, list[str]] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class UserPreference(BaseModel):

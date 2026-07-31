@@ -13,7 +13,16 @@ CHINESE_ID = re.compile(r"(?<![0-9A-Za-z])\d{17}[0-9Xx](?![0-9A-Za-z])")
 AUDIT_SUMMARY_MAX_CHARS = 500
 AUDIT_PARAM_ALLOWLIST = {
     "save_record": frozenset({"record_type", "error_code"}),
-    "update_record_status": frozenset({"new_status", "error_code"}),
+    "update_record_status": frozenset(
+        {
+            "new_status",
+            "old_version",
+            "new_version",
+            "cancelled_reminder_count",
+            "reminder_types",
+            "error_code",
+        }
+    ),
     "create_reminder": frozenset({"reminder_type", "scheduled_at", "error_code"}),
     "create_reminders": frozenset({"reminder_count", "reminder_types", "error_code"}),
     "snooze_reminder": frozenset({"new_reminder_id", "new_scheduled_at", "error_code"}),

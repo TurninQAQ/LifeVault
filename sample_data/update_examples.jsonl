@@ -1,0 +1,24 @@
+{"id":"update_001","text":"把 ChatGPT Plus 的月费改成 25 美元","selected_record_type":"subscription","expected":{"target":{"record_type":"subscription","query":"ChatGPT Plus"},"update":{"operation":"content_update","changes":{"amount":25,"currency":"USD"}}}}
+{"id":"update_002","text":"Netflix 的下次续费日改到下个月 20 号","selected_record_type":"subscription","expected":{"target":{"record_type":"subscription","query":"Netflix"},"update":{"changes":{"next_renewal_date":"2026-08-20"},"date_sources":{"next_renewal_date":"下个月20号"}}}}
+{"id":"update_003","text":"房租账单的缴费截止日改到明天","selected_record_type":"bill","expected":{"target":{"record_type":"bill","query":"房租"},"update":{"changes":{"due_date":"2026-08-01"}}}}
+{"id":"update_004","text":"京东订单的商家改成天猫","selected_record_type":"purchase","expected":{"target":{"record_type":"purchase"},"update":{"changes":{"merchant":"天猫"}}}}
+{"id":"update_005","text":"清空这条订单的备注","selected_record_type":"purchase","expected":{"update":{"operation":"content_update","changes":{"notes":null},"clear_fields":["notes"]}}}
+{"id":"update_006","text":"删除订单号","selected_record_type":"purchase","expected":{"update":{"changes":{"order_number":null},"clear_fields":["order_number"]}}}
+{"id":"update_007","text":"ChatGPT Plus 的自动续费改为关闭","selected_record_type":"subscription","expected":{"target":{"query":"ChatGPT Plus"},"update":{"changes":{"auto_renew":false}}}}
+{"id":"update_008","text":"Netflix 的付费周期改为每年","selected_record_type":"subscription","expected":{"update":{"changes":{"billing_cycle":"yearly"}}}}
+{"id":"update_009","text":"把房租标记为已支付","selected_record_type":"bill","expected":{"target":{"operation":"status_update","query":"房租"},"update":{"operation":"status_update","target_status":"paid"}}}
+{"id":"update_010","text":"把京东订单标记为已退货","selected_record_type":"purchase","expected":{"update":{"operation":"status_update","target_status":"returned"}}}
+{"id":"update_011","text":"把 Spotify 记录为已取消","selected_record_type":"subscription","expected":{"target":{"query":"Spotify"},"update":{"target_status":"cancelled"}}}
+{"id":"update_012","text":"帮我取消 ChatGPT Plus 订阅","selected_record_type":"subscription","expected":{"target":{"operation":"external_action"},"update":{"operation":"external_action"}}}
+{"id":"update_013","text":"请替我支付房租账单","selected_record_type":"bill","expected":{"target":{"operation":"external_action"},"update":{"operation":"external_action"}}}
+{"id":"update_014","text":"金额改成 30 美元并标记为已取消","selected_record_type":"subscription","expected":{"update":{"operation":"unknown","changes":{"amount":30,"currency":"USD"},"target_status":"cancelled"}}}
+{"id":"update_015","text":"把续费日往后推三天","selected_record_type":"subscription","expected":{"update":{"changes":{},"target_status":null}}}
+{"id":"update_016","text":"把上个月的房租金额改成 3200 元","selected_record_type":"bill","expected":{"target":{"record_type":"bill","query":"房租","target_date_text":"上个月"},"update":{"changes":{"amount":3200,"currency":"CNY"}}}}
+{"id":"update_017","text":"房租的账单名称改成七月房租","selected_record_type":"bill","expected":{"update":{"changes":{"bill_name":"七月房租"}}}}
+{"id":"update_018","text":"Netflix 的服务名称改成 Netflix Premium","selected_record_type":"subscription","expected":{"update":{"changes":{"service_name":"Netflix Premium"}}}}
+{"id":"update_019","text":"把这条记录的标题改成工作显示器","selected_record_type":"purchase","expected":{"update":{"changes":{"title":"工作显示器"}}}}
+{"id":"update_020","text":"备注改成公司报销","selected_record_type":"purchase","expected":{"update":{"changes":{"notes":"公司报销"}}}}
+{"id":"update_021","text":"币种改成 USD","selected_record_type":"purchase","expected":{"update":{"changes":{"currency":"USD"}}}}
+{"id":"update_022","text":"保修截止日改到明年 7 月 31 日","selected_record_type":"purchase","expected":{"update":{"changes":{"warranty_deadline":"2027-07-31"}}}}
+{"id":"update_023","text":"购买日期改成昨天","selected_record_type":"purchase","expected":{"update":{"changes":{"event_date":"2026-07-30"}}}}
+{"id":"update_024","text":"停车费的账期改成 2026 年 7 月","selected_record_type":"bill","expected":{"target":{"record_type":"bill","query":"停车费"},"update":{"changes":{"billing_period":"2026 年 7 月"}}}}

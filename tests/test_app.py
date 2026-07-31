@@ -15,6 +15,84 @@ from lifevault.storage.repository import VaultRepository
 
 
 class StreamlitAppTest(unittest.TestCase):
+    def test_natural_edit_from_record_requires_preview_and_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            st.cache_resource.clear()
+            database_path = Path(tmp) / "natural-edit.db"
+            graph_path = Path(tmp) / "natural-edit-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(
+                    record_type="subscription",
+                    title="ChatGPT Plus",
+                    amount=20,
+                    currency="USD",
+                    details={
+                        "service_name": "ChatGPT Plus",
+                        "billing_cycle": "monthly",
+                        "auto_renew": True,
+                    },
+                ),
+                "natural-edit-record",
+            )
+            environment = {
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            with patch.dict(os.environ, environment):
+                app = AppTest.from_file("lifevault/app/main.py").run(timeout=15)
+                _button(app, "自然语言编辑").click()
+                app.run(timeout=15)
+                _widget(app.text_area, "修改要求").set_value("金额改成 25 美元")
+                _button(app, "生成修改预览").click()
+                app.run(timeout=15)
+
+                turn = app.session_state["natural_update_turn"]
+                self.assertEqual(turn.interrupt_type, "update_confirmation")
+                self.assertEqual(turn.changes["amount"], 25)
+                self.assertFalse(_button(app, "确认更新").disabled)
+                _button(app, "确认更新").click()
+                app.run(timeout=15)
+                self.assertEqual(list(app.exception), [])
+
+            updated = repo.get_record("local", record.id)
+            self.assertEqual(updated.amount, 25)
+            self.assertEqual(updated.version, 2)
+
+    def test_status_button_previews_before_confirmed_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            st.cache_resource.clear()
+            database_path = Path(tmp) / "status-preview.db"
+            graph_path = Path(tmp) / "status-preview-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(record_type="bill", title="房租"),
+                "status-preview-record",
+            )
+            environment = {
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            with patch.dict(os.environ, environment):
+                app = AppTest.from_file("lifevault/app/main.py").run(timeout=15)
+                _widget(app.selectbox, "状态").set_value("paid")
+                _button(app, "更新状态").click()
+                app.run(timeout=15)
+
+                self.assertEqual(repo.get_record("local", record.id).status.value, "active")
+                self.assertIn("record_status_preview", app.session_state)
+                _button(app, "确认状态更新").click()
+                app.run(timeout=15)
+                self.assertEqual(list(app.exception), [])
+
+            updated = repo.get_record("local", record.id)
+            self.assertEqual(updated.status.value, "paid")
+            self.assertEqual(updated.version, 2)
+
     def test_saved_record_editor_previews_and_applies_partial_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             st.cache_resource.clear()

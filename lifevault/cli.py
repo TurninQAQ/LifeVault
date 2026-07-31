@@ -10,9 +10,15 @@ from zoneinfo import ZoneInfo
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.agent.service import LifeVaultAgent
+from lifevault.agent.update_graph_agent import RecordUpdateGraphAgent
 from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient
-from lifevault.models.schemas import GraphTurn, RecordStatus, ReminderStatus
+from lifevault.models.schemas import (
+    GraphTurn,
+    RecordStatus,
+    RecordUpdateTurn,
+    ReminderStatus,
+)
 from lifevault.storage.repository import VaultRepository
 from lifevault.tools.idempotency import stable_key
 from lifevault.worker.reminder_worker import ReminderWorker
@@ -52,6 +58,27 @@ def main() -> None:
 
     state = sub.add_parser("state", help="Show a graph thread state")
     state.add_argument("thread_id")
+
+    natural_edit = sub.add_parser("edit", help="Update a saved record from natural language")
+    natural_edit.add_argument("text")
+    natural_edit.add_argument("--record-id", default=None, help="Preselect a record from its own UI/context")
+    natural_edit.add_argument("--thread-id", default=None)
+    natural_edit.add_argument("--yes", action="store_true", help="Confirm after target selection and preview")
+
+    edit_resume = sub.add_parser("edit-resume", help="Resume an interrupted natural update")
+    edit_resume.add_argument("thread_id")
+    edit_resume.add_argument("--text", default=None)
+    edit_resume.add_argument("--record-id", default=None)
+    edit_resume.add_argument("--changes-json", default=None)
+    edit_resume.add_argument("--target-status", default=None)
+    edit_resume.add_argument(
+        "--action",
+        choices=["confirm", "cancel"],
+        default=None,
+    )
+
+    edit_state = sub.add_parser("edit-state", help="Show a natural-update graph state")
+    edit_state.add_argument("thread_id")
 
     search = sub.add_parser("search", help="Search saved records")
     search.add_argument("text", help="Search query")
@@ -96,6 +123,9 @@ def main() -> None:
     update.add_argument("record_id")
     update.add_argument("new_status", choices=[status.value for status in RecordStatus])
     update.add_argument("expected_version", type=int)
+    update.add_argument("--dry-run", action="store_true")
+    update.add_argument("--yes", action="store_true")
+    update.add_argument("--idempotency-key", default=None)
 
     edit = sub.add_parser("update", help="Preview or apply a typed partial record update")
     edit.add_argument("record_id")
@@ -132,6 +162,11 @@ def main() -> None:
     eval_cmd.add_argument("--use-qwen", action="store_true", help="Use configured local Qwen instead of fallback")
     eval_cmd.add_argument("--json-out", type=Path, default=None, help="Optional JSON report output path")
 
+    eval_updates = sub.add_parser("eval-updates", help="Run natural record-update eval cases")
+    eval_updates.add_argument("--examples", type=Path, default=None)
+    eval_updates.add_argument("--use-qwen", action="store_true")
+    eval_updates.add_argument("--json-out", type=Path, default=None)
+
     args = parser.parse_args()
     settings = get_settings()
 
@@ -162,10 +197,34 @@ def main() -> None:
             print(f"Wrote JSON report: {args.json_out}")
         return
 
+    if args.command == "eval-updates":
+        from lifevault.eval.update_runner import (
+            DEFAULT_UPDATE_EXAMPLES_PATH,
+            format_update_summary,
+            run_update_eval,
+            write_update_json_report,
+        )
+
+        report = run_update_eval(
+            settings,
+            examples_path=args.examples or DEFAULT_UPDATE_EXAMPLES_PATH,
+            use_qwen=args.use_qwen,
+        )
+        print(format_update_summary(report))
+        if args.json_out:
+            write_update_json_report(report, args.json_out)
+            print(f"Wrote JSON report: {args.json_out}")
+        return
+
     repository = VaultRepository(settings.database_path)
     mcp_client = InProcessPersonalVaultMcpClient(settings, repository)
     agent = LifeVaultAgent(settings, repository, mcp_client=mcp_client)
     graph_agent = GraphAgent(settings, repository, mcp_client=mcp_client)
+    update_graph_agent = RecordUpdateGraphAgent(
+        settings,
+        repository,
+        mcp_client=mcp_client,
+    )
 
     if args.command == "init-db":
         print(f"Initialized database: {settings.database_path}")
@@ -209,6 +268,66 @@ def main() -> None:
             print(f"No graph state found for thread: {args.thread_id}")
             raise SystemExit(2)
         print_graph_turn(turn)
+        return
+
+    if args.command == "edit":
+        turn = update_graph_agent.start(
+            args.text,
+            preselected_record_id=args.record_id,
+            thread_id=args.thread_id,
+        )
+        turn = drive_update_graph_interactively(
+            turn,
+            update_graph_agent,
+            yes=args.yes,
+        )
+        print_update_turn(turn)
+        return
+
+    if args.command == "edit-resume":
+        supplied = sum(
+            value is not None
+            for value in [
+                args.text,
+                args.record_id,
+                args.changes_json,
+                args.target_status,
+                args.action,
+            ]
+        )
+        if supplied > 1:
+            raise SystemExit("Provide only one resume payload.")
+        if args.text is not None:
+            payload: dict[str, Any] = {"text": args.text}
+        elif args.record_id is not None:
+            payload = {"record_id": args.record_id}
+        elif args.changes_json is not None:
+            payload = {
+                "action": "apply",
+                "changes": parse_json_object(args.changes_json, "--changes-json"),
+            }
+        elif args.target_status is not None:
+            payload = {"action": "apply", "target_status": args.target_status}
+        elif args.action is not None:
+            payload = {"action": args.action}
+        else:
+            existing = update_graph_agent.get_state(args.thread_id)
+            if existing is None:
+                print(f"No update graph state found for thread: {args.thread_id}")
+                raise SystemExit(2)
+            print_update_turn(existing)
+            payload = prompt_update_payload(existing)
+        turn = update_graph_agent.resume(args.thread_id, payload)
+        turn = drive_update_graph_interactively(turn, update_graph_agent)
+        print_update_turn(turn)
+        return
+
+    if args.command == "edit-state":
+        turn = update_graph_agent.get_state(args.thread_id)
+        if turn is None:
+            print(f"No update graph state found for thread: {args.thread_id}")
+            raise SystemExit(2)
+        print_update_turn(turn)
         return
 
     if args.command == "search":
@@ -321,10 +440,39 @@ def main() -> None:
         return
 
     if args.command == "status":
+        preview = mcp_client.preview_record_status_update(
+            args.record_id,
+            args.new_status,
+            args.expected_version,
+        )
+        if not preview.get("ok") and (preview.get("error") or {}).get("code") == "no_changes":
+            print("Record status is already unchanged.")
+            return
+        preview = require_mcp_ok("preview_record_status_update", preview)
+        print_json(
+            {
+                "record": preview["record"],
+                "reminders_to_cancel": preview.get("reminders_to_cancel") or [],
+                "warnings": preview.get("warnings") or [],
+            }
+        )
+        if args.dry_run:
+            return
+        if not args.yes and not ask_yes_no("提交这次状态更新？"):
+            print("Status update cancelled.")
+            return
+        key = args.idempotency_key or stable_key(
+            "cli-record-status-update",
+            args.record_id,
+            args.expected_version,
+            args.new_status,
+        )
         result = mcp_client.update_record_status(
             args.record_id,
             args.new_status,
             args.expected_version,
+            key,
+            user_confirmed=True,
         )
         record = require_mcp_ok("update_record_status", result)["record"]
         print(f"Updated {record['id']} to {record['status']}, version={record['version']}")
@@ -407,6 +555,77 @@ def drive_graph_interactively(
             payload = prompt_payload(turn)
         turn = graph_agent.resume(turn.thread_id, payload)
     return turn
+
+
+def drive_update_graph_interactively(
+    turn: RecordUpdateTurn,
+    graph_agent: RecordUpdateGraphAgent,
+    yes: bool = False,
+) -> RecordUpdateTurn:
+    while turn.status == "interrupted":
+        print_update_turn(turn)
+        if yes and turn.interrupt_type == "update_confirmation":
+            payload = {"action": "confirm"}
+        else:
+            payload = prompt_update_payload(turn)
+        turn = graph_agent.resume(turn.thread_id, payload)
+    return turn
+
+
+def print_update_turn(turn: RecordUpdateTurn) -> None:
+    print(f"Thread: {turn.thread_id}")
+    print(f"Status: {turn.status}")
+    if turn.interrupt_type:
+        print(f"Interrupt: {turn.interrupt_type}")
+    if turn.prompt:
+        print(turn.prompt)
+    if turn.target_query:
+        print("Target query:")
+        print_json(turn.target_query)
+    if turn.candidates:
+        print("Candidates:")
+        for index, candidate in enumerate(turn.candidates, start=1):
+            print(
+                f"{index}. {candidate.get('id')} | {candidate.get('record_type')} | "
+                f"{candidate.get('title')} | {candidate.get('status')} | "
+                f"v{candidate.get('version')}"
+            )
+    if turn.record:
+        print("Selected record:")
+        print_json(turn.record)
+    if turn.changes:
+        print("Changes:")
+        print_json(turn.changes)
+    if turn.target_status:
+        print(f"Target status: {turn.target_status}")
+    if turn.preview:
+        print("Preview:")
+        print_json(turn.preview)
+    if turn.no_changes:
+        print("No changes were needed.")
+    if turn.updated_record_id:
+        print(f"Updated record: {turn.updated_record_id}")
+    if turn.field_errors:
+        for field, messages in turn.field_errors.items():
+            for message in messages:
+                print(f"- {field}: {message}")
+    if turn.warnings:
+        print("Warnings: " + "; ".join(turn.warnings))
+    if turn.errors:
+        print("Errors: " + "; ".join(turn.errors))
+
+
+def prompt_update_payload(turn: RecordUpdateTurn) -> dict[str, Any]:
+    if turn.interrupt_type in {"missing_target", "target_not_found", "missing_update_details"}:
+        return {"text": input("补充：").strip()}
+    if turn.interrupt_type == "target_selection":
+        selected = input("记录序号或 ID：").strip()
+        if selected.isdigit() and 1 <= int(selected) <= len(turn.candidates):
+            selected = str(turn.candidates[int(selected) - 1]["id"])
+        return {"record_id": selected}
+    if turn.interrupt_type == "update_confirmation":
+        return {"action": "confirm" if ask_yes_no("提交这次记录更新？") else "cancel"}
+    return {"action": "cancel"}
 
 
 def print_graph_turn(turn: GraphTurn) -> None:

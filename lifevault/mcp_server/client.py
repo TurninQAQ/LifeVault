@@ -105,7 +105,22 @@ class PersonalVaultMcpClient(Protocol):
     def snooze_reminder(self, reminder_id: str, new_scheduled_at: str) -> dict[str, Any]:
         ...
 
-    def update_record_status(self, record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
+    def preview_record_status_update(
+        self,
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        ...
+
+    def update_record_status(
+        self,
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
         ...
 
     def update_preferences(
@@ -294,13 +309,37 @@ class InProcessPersonalVaultMcpClient:
             },
         )
 
-    def update_record_status(self, record_id: str, new_status: str, expected_version: int) -> dict[str, Any]:
+    def preview_record_status_update(
+        self,
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "preview_record_status_update",
+            {
+                "record_id": record_id,
+                "new_status": new_status,
+                "expected_version": expected_version,
+            },
+        )
+
+    def update_record_status(
+        self,
+        record_id: str,
+        new_status: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
         return self.call_tool(
             "update_record_status",
             {
                 "record_id": record_id,
                 "new_status": new_status,
                 "expected_version": expected_version,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
             },
         )
 
