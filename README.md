@@ -2,6 +2,8 @@
 
 LifeVault v0.14 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create-record workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
+For a version-by-version implementation walkthrough, see [skill.md](skill.md).
+
 ## Current MVP
 
 Implemented chain:
