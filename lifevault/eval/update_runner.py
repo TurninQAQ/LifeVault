@@ -47,27 +47,39 @@ def run_update_eval(
     for case in cases:
         try:
             target, target_warnings = extractor.extract_target(case.text, active_now)
-            intent, update_warnings = extractor.extract_update(
-                case.text,
-                case.selected_record_type,
-                active_now,
-            )
-            changes, date_sources, field_errors = build_record_update_changes(
-                intent,
-                case.selected_record_type,
-                settings.default_timezone,
-                active_now,
-            )
-            actual = {
-                "target": target.model_dump(mode="json"),
-                "update": {
+            update_warnings: list[str] = []
+            if target.operation in {"archive_record", "restore_record"}:
+                update_actual = {
+                    "operation": target.operation,
+                    "changes": {},
+                    "target_status": None,
+                    "clear_fields": [],
+                    "date_sources": {},
+                    "field_errors": {},
+                }
+            else:
+                intent, update_warnings = extractor.extract_update(
+                    case.text,
+                    case.selected_record_type,
+                    active_now,
+                )
+                changes, date_sources, field_errors = build_record_update_changes(
+                    intent,
+                    case.selected_record_type,
+                    settings.default_timezone,
+                    active_now,
+                )
+                update_actual = {
                     "operation": intent.operation,
                     "changes": changes,
                     "target_status": intent.target_status.value if intent.target_status else None,
                     "clear_fields": intent.clear_fields,
                     "date_sources": date_sources,
                     "field_errors": field_errors,
-                },
+                }
+            actual = {
+                "target": target.model_dump(mode="json"),
+                "update": update_actual,
             }
             results.append(
                 _evaluate_update_case(

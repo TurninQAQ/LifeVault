@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from lifevault.models.schemas import (
     DuplicateCandidate,
     LifeRecord,
+    RecordLifecyclePreview,
     RecordStatus,
     RecordType,
     RecordUpdatePatch,
@@ -247,6 +248,66 @@ def plan_record_status_update(
         ),
         reminders_to_cancel=reminders_to_cancel,
     )
+
+
+def plan_record_archive(
+    current: LifeRecord,
+    reminders: list[Reminder],
+    now: datetime,
+) -> RecordLifecyclePreview:
+    if current.archived_at is not None:
+        raise RecordUpdateError("no_changes", "The record is already archived.")
+    if any(reminder.status == ReminderStatus.SENDING for reminder in reminders):
+        raise RecordUpdateError(
+            "reminder_in_flight",
+            "A reminder for this record is currently being sent.",
+        )
+
+    normalized_now = _utc_datetime(now)
+    reminders_to_cancel = [
+        reminder
+        for reminder in reminders
+        if reminder.status in {ReminderStatus.PENDING, ReminderStatus.SNOOZED}
+    ]
+    return RecordLifecyclePreview(
+        current_record=current,
+        record=current.model_copy(
+            update={
+                "archived_at": normalized_now,
+                "version": current.version + 1,
+                "updated_at": normalized_now,
+            }
+        ),
+        operation="archive_record",
+        reminders_to_cancel=reminders_to_cancel,
+    )
+
+
+def plan_record_restore(
+    current: LifeRecord,
+    now: datetime,
+) -> RecordLifecyclePreview:
+    if current.archived_at is None:
+        raise RecordUpdateError("no_changes", "The record is not archived.")
+
+    normalized_now = _utc_datetime(now)
+    return RecordLifecyclePreview(
+        current_record=current,
+        record=current.model_copy(
+            update={
+                "archived_at": None,
+                "version": current.version + 1,
+                "updated_at": normalized_now,
+            }
+        ),
+        operation="restore_record",
+    )
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _apply_patch(current: LifeRecord, patch: RecordUpdatePatch) -> LifeRecord:

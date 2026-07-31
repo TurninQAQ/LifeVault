@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS life_records (
     event_date TEXT,
     deadline TEXT,
     status TEXT NOT NULL,
+    archived_at TEXT,
     version INTEGER NOT NULL DEFAULT 1,
     details_json TEXT NOT NULL DEFAULT '{}',
     notes TEXT,
@@ -88,6 +89,20 @@ CREATE TABLE IF NOT EXISTS record_status_update_operations (
 
 CREATE INDEX IF NOT EXISTS idx_record_status_update_operations_record
 ON record_status_update_operations(user_id, record_id);
+
+CREATE TABLE IF NOT EXISTS record_lifecycle_operations (
+    user_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    record_id TEXT NOT NULL REFERENCES life_records(id),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_record_lifecycle_operations_record
+ON record_lifecycle_operations(user_id, record_id);
 
 CREATE TABLE IF NOT EXISTS user_preferences (
     user_id TEXT PRIMARY KEY,
@@ -176,3 +191,13 @@ def init_db(database_path: Path) -> None:
         if "UNIQUE(record_id, reminder_type, scheduled_at)" in reminder_sql:
             conn.executescript(REMINDER_SLOT_MIGRATION)
         conn.executescript(SCHEMA)
+        record_columns = {
+            column["name"]
+            for column in conn.execute("PRAGMA table_info(life_records)").fetchall()
+        }
+        if "archived_at" not in record_columns:
+            conn.execute("ALTER TABLE life_records ADD COLUMN archived_at TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_life_records_archive "
+            "ON life_records(user_id, archived_at)"
+        )

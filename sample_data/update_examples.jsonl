@@ -22,3 +22,15 @@
 {"id":"update_022","text":"保修截止日改到明年 7 月 31 日","selected_record_type":"purchase","expected":{"update":{"changes":{"warranty_deadline":"2027-07-31"}}}}
 {"id":"update_023","text":"购买日期改成昨天","selected_record_type":"purchase","expected":{"update":{"changes":{"event_date":"2026-07-30"}}}}
 {"id":"update_024","text":"停车费的账期改成 2026 年 7 月","selected_record_type":"bill","expected":{"target":{"record_type":"bill","query":"停车费"},"update":{"changes":{"billing_period":"2026 年 7 月"}}}}
+{"id":"lifecycle_001","text":"归档 ChatGPT Plus 会员记录","selected_record_type":"subscription","expected":{"target":{"operation":"archive_record","record_type":"subscription","query":"ChatGPT Plus"},"update":{"operation":"archive_record","changes":{}}}}
+{"id":"lifecycle_002","text":"删除房租账单记录","selected_record_type":"bill","expected":{"target":{"operation":"archive_record","record_type":"bill","query":"房租"}}}
+{"id":"lifecycle_003","text":"把京东键盘订单记录归档","selected_record_type":"purchase","expected":{"target":{"operation":"archive_record","record_type":"purchase","query":"京东键盘"}}}
+{"id":"lifecycle_004","text":"恢复归档的 ChatGPT Plus 会员记录","selected_record_type":"subscription","expected":{"target":{"operation":"restore_record","query":"ChatGPT Plus"},"update":{"operation":"restore_record"}}}
+{"id":"lifecycle_005","text":"取消归档 Netflix 会员记录","selected_record_type":"subscription","expected":{"target":{"operation":"restore_record","record_type":"subscription","query":"Netflix"}}}
+{"id":"lifecycle_006","text":"找回删除的停车费账单记录","selected_record_type":"bill","expected":{"target":{"operation":"restore_record","record_type":"bill","query":"停车费"}}}
+{"id":"lifecycle_007","text":"删除订单号","selected_record_type":"purchase","expected":{"target":{"operation":"content_update"},"update":{"operation":"content_update","changes":{"order_number":null}}}}
+{"id":"lifecycle_008","text":"恢复 ChatGPT Plus","selected_record_type":"subscription","expected":{"target":{"operation":"unknown","query":"ChatGPT Plus"}}}
+{"id":"lifecycle_009","text":"删除它","selected_record_type":"purchase","expected":{"target":{"operation":"unknown","query":null}}}
+{"id":"lifecycle_010","text":"把房租账单记录归档","selected_record_type":"bill","expected":{"target":{"operation":"archive_record","query":"房租"}}}
+{"id":"lifecycle_011","text":"将 Spotify 会员记录删除","selected_record_type":"subscription","expected":{"target":{"operation":"archive_record","query":"Spotify"}}}
+{"id":"lifecycle_012","text":"恢复删除的京东耳机订单记录","selected_record_type":"purchase","expected":{"target":{"operation":"restore_record","record_type":"purchase","query":"京东耳机"}}}

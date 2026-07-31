@@ -21,6 +21,10 @@ class McpServerTest(unittest.TestCase):
                 "update_record",
                 "find_duplicate",
                 "update_record_status",
+                "preview_record_archive",
+                "archive_record",
+                "preview_record_restore",
+                "restore_record",
                 "create_reminder",
                 "create_reminders",
                 "list_reminders",
@@ -56,6 +60,12 @@ class McpServerTest(unittest.TestCase):
             self.assertTrue(result["accepted_cancel"]["ok"])
             self.assertEqual(result["accepted_cancel"]["reminder"]["status"], "cancelled")
             self.assertEqual(result["updated_record_status"], "completed")
+            self.assertEqual(result["archive_preview_version"], 4)
+            self.assertEqual(result["archived_record_version"], 4)
+            self.assertEqual(result["archived_search_count"], 1)
+            self.assertEqual(result["restore_preview_version"], 5)
+            self.assertEqual(result["restored_record_version"], 5)
+            self.assertFalse(result["rejected_archive"]["ok"])
             self.assertGreaterEqual(result["audit_count"], 8)
             self.assertGreaterEqual(result["audit_rejected_count"], 3)
             self.assertEqual(result["default_preference_time"], "09:00")

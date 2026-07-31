@@ -77,11 +77,7 @@ class FallbackUpdateExtractor:
     def extract_target(self, text: str, now: datetime) -> RecordTargetQuery:
         del now
         operation = _operation(text)
-        target_segment = re.split(
-            r"(?:改成|改为|修改为|更正为|更新为|设为|设置为|标记为|清空|删除|移除)",
-            text,
-            maxsplit=1,
-        )[0]
+        target_segment = _target_segment(text, operation)
         return RecordTargetQuery(
             operation=operation,
             record_type=_record_type(text),
@@ -113,7 +109,7 @@ class FallbackUpdateExtractor:
             values["operation"] = "unknown"
         elif target_status is not None:
             values["operation"] = "status_update"
-        elif operation != "external_action":
+        elif operation not in {"external_action", "archive_record", "restore_record"}:
             values["operation"] = "content_update"
         return NaturalRecordUpdateIntent.model_validate(values)
 
@@ -131,6 +127,11 @@ class UpdateExtractor:
     ) -> tuple[RecordTargetQuery, list[str]]:
         warnings: list[str] = []
         fallback = self.fallback.extract_target(text, now)
+        if fallback.operation == "unknown" and re.search(
+            r"(?:恢复|找回|取消归档|归档|删除|删掉|移除)",
+            text,
+        ):
+            return fallback, warnings
         if self.settings.use_qwen:
             try:
                 qwen = self.qwen.extract_target(text, now)
@@ -166,7 +167,7 @@ def _target_prompt(text: str, now: datetime) -> str:
 
 只提取目标搜索信息，不要生成修改字段：
 {{
-  "operation": "content_update | status_update | external_action | unknown",
+  "operation": "content_update | status_update | archive_record | restore_record | external_action | unknown",
   "record_type": "purchase | subscription | bill | null",
   "query": "用于搜索现有记录的核心名称关键词，不知道则 null",
   "target_date_text": "只属于目标旧记录描述的日期，不知道则 null"
@@ -175,6 +176,9 @@ def _target_prompt(text: str, now: datetime) -> str:
 规则：
 - “已经支付/已经取消/标记为”是 status_update。
 - “帮我付款/退款/停止扣款/帮我取消真实订阅”是 external_action。
+- “归档这条记录/删除某某记录”是 archive_record，删除字段不是归档。
+- 只有“恢复归档记录/取消归档/找回删除记录”等明确措辞才是 restore_record。
+- “恢复 ChatGPT Plus”含义不明确，返回 unknown，不能猜成 restore_record。
 - 修改后的新金额、新标题或新日期不能放进 query 或 target_date_text。
 - query 只能是旧记录的核心名称，例如“把 ChatGPT Plus 的月费改成 25 美元”的 query 是“ChatGPT Plus”。
 - 字段名（金额、月费、续费日、状态）和状态值（已支付、已取消）都不是 query。
@@ -206,7 +210,7 @@ def _update_prompt(text: str, record_type: RecordType, now: datetime) -> str:
         },
     }[record_type]
     template = {
-        "operation": "content_update | status_update | external_action | unknown",
+        "operation": "content_update | status_update | archive_record | restore_record | external_action | unknown",
         "title": None,
         "amount": None,
         "currency": None,
@@ -311,8 +315,14 @@ def _looks_like_target_date(value: str) -> bool:
 def _operation(text: str) -> str:
     if _is_external_action(text):
         return "external_action"
+    if _is_restore_record(text):
+        return "restore_record"
+    if _is_archive_record(text):
+        return "archive_record"
     if _target_status(text, _record_type(text) or RecordType.PURCHASE) is not None:
         return "status_update"
+    if _clear_fields(text):
+        return "content_update"
     if any(
         token in text
         for token in [
@@ -324,13 +334,49 @@ def _operation(text: str) -> str:
             "设为",
             "设置",
             "清空",
-            "删除",
-            "移除",
             "不再记录",
         ]
     ):
         return "content_update"
     return "unknown"
+
+
+def _is_restore_record(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return bool(
+        "取消归档" in compact
+        or re.search(
+            r"(?:恢复|找回).{0,20}(?:归档|删除).{0,20}(?:记录|订单|账单|会员|订阅)",
+            compact,
+        )
+        or re.search(
+            r"(?:归档|删除)(?:的)?.{0,20}(?:记录|订单|账单|会员|订阅).{0,10}(?:恢复|找回)",
+            compact,
+        )
+    )
+
+
+def _is_archive_record(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    action = r"(?:归档|删除|删掉|移除)"
+    record = r"(?:这条|该条|那条|整个)?(?:购买|订单|订阅|会员|账单)?记录"
+    return bool(
+        re.search(rf"{action}.{{0,30}}{record}", compact)
+        or re.search(rf"(?:把|将).{{1,30}}{record}.{{0,10}}{action}", compact)
+    )
+
+
+def _target_segment(text: str, operation: str) -> str:
+    if operation in {"archive_record", "restore_record"}:
+        value = re.sub(r"取消归档", "", text)
+        value = re.sub(r"(?:恢复|找回).{0,3}(?:归档|删除)(?:的)?", "", value)
+        value = re.sub(r"(?:归档|删除|删掉|移除)", "", value)
+        return value
+    return re.split(
+        r"(?:改成|改为|修改为|更正为|更新为|设为|设置为|标记为|清空|删除|移除)",
+        text,
+        maxsplit=1,
+    )[0]
 
 
 def _is_external_action(text: str) -> bool:

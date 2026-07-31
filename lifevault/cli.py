@@ -85,6 +85,11 @@ def main() -> None:
 
     list_records = sub.add_parser("list", help="List records")
     list_records.add_argument("--query", default=None)
+    list_records.add_argument(
+        "--archive-scope",
+        choices=["active", "archived", "all"],
+        default="active",
+    )
 
     subscriptions = sub.add_parser("subscriptions", help="List upcoming subscription renewals")
     subscriptions.add_argument("--days", type=int, default=30, help="Renewal window in days")
@@ -147,6 +152,16 @@ def main() -> None:
         default=None,
         help="Optional stable retry key; derived from the request by default",
     )
+
+    for command, help_text in (
+        ("archive", "Archive a record and cancel its active reminders"),
+        ("restore", "Restore an archived record without recreating reminders"),
+    ):
+        lifecycle = sub.add_parser(command, help=help_text)
+        lifecycle.add_argument("record_id")
+        lifecycle.add_argument("expected_version", type=int)
+        lifecycle.add_argument("--dry-run", action="store_true")
+        lifecycle.add_argument("--yes", action="store_true")
 
     worker = sub.add_parser("worker", help="Run reminder worker")
     worker.add_argument("--once", action="store_true", help="Scan once and exit")
@@ -336,7 +351,10 @@ def main() -> None:
         return
 
     if args.command == "list":
-        result = mcp_client.search_records(query=args.query)
+        result = mcp_client.search_records(
+            query=args.query,
+            archive_scope=args.archive_scope,
+        )
         records = require_mcp_ok("search_records", result).get("records", [])
         for record in records:
             deadline = record.get("deadline") or "-"
@@ -344,7 +362,8 @@ def main() -> None:
             amount_text = f"{amount:g}" if amount is not None else "-"
             print(
                 f"{record['id']} | v{record['version']} | {record['record_type']} | "
-                f"{record['title']} | {amount_text} | {record['status']} | {deadline}"
+                f"{record['title']} | {amount_text} | {record['status']} | {deadline} | "
+                f"archived={record.get('archived_at') or '-'}"
             )
         return
 
@@ -529,6 +548,60 @@ def main() -> None:
         )
         return
 
+    if args.command in {"archive", "restore"}:
+        operation = args.command
+        preview_tool = (
+            mcp_client.preview_record_archive
+            if operation == "archive"
+            else mcp_client.preview_record_restore
+        )
+        write_tool = (
+            mcp_client.archive_record
+            if operation == "archive"
+            else mcp_client.restore_record
+        )
+        preview_name = f"preview_record_{operation}"
+        preview_result = preview_tool(args.record_id, args.expected_version)
+        if not preview_result.get("ok") and (
+            preview_result.get("error") or {}
+        ).get("code") == "no_changes":
+            print(f"Record lifecycle is already unchanged for {operation}.")
+            return
+        preview = require_mcp_ok(preview_name, preview_result)
+        print_json(
+            {
+                "operation": preview["operation"],
+                "record": preview["record"],
+                "reminders_to_cancel": preview.get("reminders_to_cancel") or [],
+                "recoverable": preview.get("recoverable", True),
+                "warnings": preview.get("warnings") or [],
+            }
+        )
+        if args.dry_run:
+            return
+        prompt = "归档这条记录？" if operation == "archive" else "恢复这条归档记录？"
+        if not args.yes and not ask_yes_no(prompt):
+            print(f"Record {operation} cancelled.")
+            return
+        key = stable_key(
+            f"cli-record-{operation}",
+            args.record_id,
+            args.expected_version,
+        )
+        result = write_tool(
+            args.record_id,
+            args.expected_version,
+            key,
+            user_confirmed=True,
+        )
+        outcome = require_mcp_ok(f"{operation}_record", result)
+        record = outcome["record"]
+        print(
+            f"{operation.title()}d {record['id']}, version={record['version']}, "
+            f"cancelled_reminders={len(outcome.get('cancelled_reminders') or [])}"
+        )
+        return
+
     if args.command == "worker":
         worker_service = ReminderWorker(settings, repository)
         if args.once:
@@ -596,6 +669,8 @@ def print_update_turn(turn: RecordUpdateTurn) -> None:
     if turn.changes:
         print("Changes:")
         print_json(turn.changes)
+    if turn.operation:
+        print(f"Operation: {turn.operation}")
     if turn.target_status:
         print(f"Target status: {turn.target_status}")
     if turn.preview:
@@ -624,7 +699,12 @@ def prompt_update_payload(turn: RecordUpdateTurn) -> dict[str, Any]:
             selected = str(turn.candidates[int(selected) - 1]["id"])
         return {"record_id": selected}
     if turn.interrupt_type == "update_confirmation":
-        return {"action": "confirm" if ask_yes_no("提交这次记录更新？") else "cancel"}
+        prompts = {
+            "archive_record": "归档这条记录？",
+            "restore_record": "恢复这条归档记录？",
+        }
+        prompt = prompts.get(turn.operation, "提交这次记录更新？")
+        return {"action": "confirm" if ask_yes_no(prompt) else "cancel"}
     return {"action": "cancel"}
 
 
@@ -646,6 +726,7 @@ def print_graph_turn(turn: GraphTurn) -> None:
             print(
                 f"- {duplicate.get('record_id')} {duplicate.get('title')} "
                 f"{duplicate.get('score', 0):.2f}: {duplicate.get('reason')}"
+                f"{' [archived]' if duplicate.get('archived') else ''}"
             )
     if turn.record:
         print("Record:")

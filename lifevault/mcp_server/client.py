@@ -24,6 +24,7 @@ class PersonalVaultMcpClient(Protocol):
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 50,
+        archive_scope: str = "active",
     ) -> dict[str, Any]:
         ...
 
@@ -123,6 +124,34 @@ class PersonalVaultMcpClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def preview_record_archive(
+        self, record_id: str, expected_version: int
+    ) -> dict[str, Any]:
+        ...
+
+    def archive_record(
+        self,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        ...
+
+    def preview_record_restore(
+        self, record_id: str, expected_version: int
+    ) -> dict[str, Any]:
+        ...
+
+    def restore_record(
+        self,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        ...
+
     def update_preferences(
         self,
         preferences: dict[str, Any],
@@ -154,6 +183,7 @@ class InProcessPersonalVaultMcpClient:
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 50,
+        archive_scope: str = "active",
     ) -> dict[str, Any]:
         return self.call_tool(
             "search_records",
@@ -163,6 +193,7 @@ class InProcessPersonalVaultMcpClient:
                 "date_from": date_from,
                 "date_to": date_to,
                 "limit": limit,
+                "archive_scope": archive_scope,
             },
         )
 
@@ -337,6 +368,56 @@ class InProcessPersonalVaultMcpClient:
             {
                 "record_id": record_id,
                 "new_status": new_status,
+                "expected_version": expected_version,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
+            },
+        )
+
+    def preview_record_archive(
+        self, record_id: str, expected_version: int
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "preview_record_archive",
+            {"record_id": record_id, "expected_version": expected_version},
+        )
+
+    def archive_record(
+        self,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "archive_record",
+            {
+                "record_id": record_id,
+                "expected_version": expected_version,
+                "idempotency_key": idempotency_key,
+                "user_confirmed": user_confirmed,
+            },
+        )
+
+    def preview_record_restore(
+        self, record_id: str, expected_version: int
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "preview_record_restore",
+            {"record_id": record_id, "expected_version": expected_version},
+        )
+
+    def restore_record(
+        self,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        return self.call_tool(
+            "restore_record",
+            {
+                "record_id": record_id,
                 "expected_version": expected_version,
                 "idempotency_key": idempotency_key,
                 "user_confirmed": user_confirmed,

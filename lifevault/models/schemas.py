@@ -259,6 +259,7 @@ class LifeRecord(LifeRecordCreate):
     version: int
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
 
 
 class RecordUpdatePatch(BaseModel):
@@ -357,7 +358,14 @@ class RecordTargetQuery(BaseModel):
 
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
-    operation: Literal["content_update", "status_update", "external_action", "unknown"] = "unknown"
+    operation: Literal[
+        "content_update",
+        "status_update",
+        "archive_record",
+        "restore_record",
+        "external_action",
+        "unknown",
+    ] = "unknown"
     record_type: RecordType | None = None
     query: str | None = None
     target_date_text: str | None = None
@@ -399,7 +407,14 @@ class NaturalRecordUpdateIntent(BaseModel):
         allow_inf_nan=False,
     )
 
-    operation: Literal["content_update", "status_update", "external_action", "unknown"] = "unknown"
+    operation: Literal[
+        "content_update",
+        "status_update",
+        "archive_record",
+        "restore_record",
+        "external_action",
+        "unknown",
+    ] = "unknown"
     title: str | None = None
     amount: float | None = Field(default=None, ge=0)
     currency: str | None = None
@@ -519,6 +534,7 @@ class DuplicateCandidate(BaseModel):
     title: str
     reason: str
     score: float
+    archived: bool = False
 
 
 class RecordUpdatePreview(BaseModel):
@@ -549,6 +565,22 @@ class RecordStatusUpdatePreview(BaseModel):
 
 class RecordStatusUpdateResult(BaseModel):
     record: LifeRecord
+    cancelled_reminders: list[Reminder] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RecordLifecyclePreview(BaseModel):
+    current_record: LifeRecord
+    record: LifeRecord
+    operation: Literal["archive_record", "restore_record"]
+    reminders_to_cancel: list[Reminder] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    recoverable: bool = True
+
+
+class RecordLifecycleResult(BaseModel):
+    record: LifeRecord
+    operation: Literal["archive_record", "restore_record"]
     cancelled_reminders: list[Reminder] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -624,6 +656,7 @@ class RecordUpdateTurn(BaseModel):
     selected_record_id: str | None = None
     record: dict[str, Any] | None = None
     changes: dict[str, Any] = Field(default_factory=dict)
+    operation: str | None = None
     target_status: str | None = None
     preview: dict[str, Any] | None = None
     updated_record_id: str | None = None

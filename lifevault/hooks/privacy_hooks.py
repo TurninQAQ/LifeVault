@@ -41,6 +41,16 @@ AUDIT_PARAM_ALLOWLIST = {
             "error_code",
         }
     ),
+    "archive_record": frozenset(
+        {
+            "old_version",
+            "new_version",
+            "cancelled_reminder_count",
+            "reminder_types",
+            "error_code",
+        }
+    ),
+    "restore_record": frozenset({"old_version", "new_version", "error_code"}),
 }
 AUDIT_ENUM_VALUES = {
     "record_type": frozenset({"purchase", "subscription", "bill"}),

@@ -129,7 +129,11 @@ def render_graph_turn(agent: GraphAgent, turn: GraphTurn) -> None:
     if turn.interrupt_type == "duplicate_review":
         st.warning("发现疑似重复记录")
         for duplicate in turn.duplicate_candidates:
-            st.write(f"{duplicate.get('title')} | {duplicate.get('score', 0):.2f} | {duplicate.get('reason')}")
+            marker = " | 已归档" if duplicate.get("archived") else ""
+            st.write(
+                f"{duplicate.get('title')} | {duplicate.get('score', 0):.2f} | "
+                f"{duplicate.get('reason')}{marker}"
+            )
         if turn.record:
             st.subheader("新记录预览")
             st.json(turn.record)
@@ -733,6 +737,10 @@ def render_natural_record_update(agent: RecordUpdateGraphAgent) -> None:
     if turn.status == "completed":
         if turn.no_changes:
             st.info("记录已经是目标值，没有执行写入。")
+        elif turn.operation == "archive_record":
+            st.success("记录已归档。")
+        elif turn.operation == "restore_record":
+            st.success("记录已恢复，原提醒不会自动重建。")
         else:
             st.success("记录更新完成。")
         if st.button("开始另一项修改", key=f"natural_reset_{turn.thread_id}"):
@@ -773,6 +781,7 @@ def render_natural_record_update(agent: RecordUpdateGraphAgent) -> None:
             candidate["id"]: (
                 f"{candidate.get('title') or '-'} · {candidate.get('record_type')} · "
                 f"{candidate.get('status')} · v{candidate.get('version')}"
+                f"{' · 已归档' if candidate.get('archived_at') else ''}"
             )
             for candidate in turn.candidates
         }
@@ -818,6 +827,33 @@ def _render_natural_update_confirmation(
     for field, messages in turn.field_errors.items():
         for message in messages:
             st.error(f"{field}: {message}")
+
+    lifecycle = turn.operation in {"archive_record", "restore_record"}
+    if lifecycle:
+        if turn.operation == "archive_record":
+            st.warning("归档后该记录会从当前记录中隐藏，待发送提醒将被取消。")
+        else:
+            st.info("恢复记录不会自动重建归档时取消的提醒。")
+        actions = st.columns([1, 1, 4])
+        label = "确认归档" if turn.operation == "archive_record" else "确认恢复"
+        if actions[0].button(
+            label,
+            type="primary",
+            disabled=bool(turn.field_errors),
+            key=f"natural_confirm_{turn.thread_id}",
+        ):
+            st.session_state["natural_update_turn"] = agent.resume(
+                turn.thread_id,
+                {"action": "confirm"},
+            )
+            st.rerun()
+        if actions[1].button("取消", key=f"natural_confirm_cancel_{turn.thread_id}"):
+            st.session_state["natural_update_turn"] = agent.resume(
+                turn.thread_id,
+                {"action": "cancel"},
+            )
+            st.rerun()
+        return
 
     if turn.target_status:
         record_type = record.get("record_type")
@@ -948,14 +984,24 @@ def render_records(
     render_natural_record_update(update_agent)
     st.divider()
 
-    query = st.text_input("关键词", key="record_query")
-    result = mcp_client.search_records(query=query or None)
+    filters = st.columns([1.2, 4])
+    scope = filters[0].radio(
+        "记录视图",
+        options=["active", "archived"],
+        format_func=lambda value: "当前记录" if value == "active" else "归档记录",
+        horizontal=True,
+        key="record_archive_scope",
+    )
+    query = filters[1].text_input("关键词", key="record_query")
+    result = mcp_client.search_records(
+        query=query or None,
+        archive_scope=scope,
+    )
     if not render_mcp_error("search_records", result):
         return
     records = result.get("records", [])
     if not records:
         st.info("暂无记录")
-        return
 
     for record in records:
         with st.container(border=True):
@@ -974,7 +1020,13 @@ def render_records(
                     "保修截止："
                     f"{details.get('warranty_deadline') or '-'}"
                 )
-            actions = st.columns([2, 1, 1, 1])
+            if scope == "archived":
+                st.caption(f"归档时间：{record.get('archived_at') or '-'}")
+                if st.button("恢复记录", key=f"restore_{record['id']}"):
+                    _start_record_lifecycle_preview(mcp_client, record, "restore")
+                continue
+
+            actions = st.columns([2, 1, 1, 1, 1])
             status = actions[0].selectbox(
                 "状态",
                 options=RECORD_STATUS_OPTIONS[record["record_type"]],
@@ -1008,8 +1060,14 @@ def render_records(
             if actions[3].button("自然语言编辑", key=f"natural_edit_{record['id']}"):
                 st.session_state["natural_edit_record_id"] = record["id"]
                 st.rerun()
+            if actions[4].button("归档", key=f"archive_{record['id']}"):
+                _start_record_lifecycle_preview(mcp_client, record, "archive")
 
     render_record_status_preview(mcp_client)
+    render_record_lifecycle_preview(mcp_client)
+
+    if scope == "archived":
+        return
 
     natural_edit_record_id = st.session_state.get("natural_edit_record_id")
     if isinstance(natural_edit_record_id, str):
@@ -1048,6 +1106,76 @@ def render_records(
 
     st.divider()
     render_saved_record_editor(mcp_client, selected)
+
+
+def _start_record_lifecycle_preview(
+    mcp_client: PersonalVaultMcpClient,
+    record: dict[str, Any],
+    operation: str,
+) -> None:
+    preview_tool = (
+        mcp_client.preview_record_archive
+        if operation == "archive"
+        else mcp_client.preview_record_restore
+    )
+    tool_name = f"preview_record_{operation}"
+    preview = preview_tool(record["id"], int(record["version"]))
+    if render_mcp_error(tool_name, preview):
+        st.session_state["record_lifecycle_preview"] = {
+            "operation": operation,
+            "record_id": record["id"],
+            "expected_version": int(record["version"]),
+            "idempotency_key": stable_key(
+                f"streamlit-record-{operation}",
+                record["id"],
+                record["version"],
+            ),
+            "preview": preview,
+        }
+        st.rerun()
+
+
+def render_record_lifecycle_preview(mcp_client: PersonalVaultMcpClient) -> None:
+    state = st.session_state.get("record_lifecycle_preview")
+    if not isinstance(state, dict):
+        return
+    preview = state.get("preview") or {}
+    record = preview.get("record") or {}
+    operation = state.get("operation")
+    st.divider()
+    st.subheader("归档预览" if operation == "archive" else "恢复预览")
+    st.write(f"**{record.get('title') or '-'}** · v{record.get('version')}")
+    reminders = preview.get("reminders_to_cancel") or []
+    if operation == "archive":
+        st.caption(f"将取消 {len(reminders)} 个待处理提醒；该操作可以恢复。")
+    else:
+        st.caption("恢复记录不会自动重建之前取消的提醒。")
+    actions = st.columns([1, 1, 4])
+    label = "确认归档" if operation == "archive" else "确认恢复"
+    if actions[0].button(label, type="primary", key="confirm_record_lifecycle"):
+        write_tool = (
+            mcp_client.archive_record
+            if operation == "archive"
+            else mcp_client.restore_record
+        )
+        result = write_tool(
+            state["record_id"],
+            state["expected_version"],
+            state["idempotency_key"],
+            user_confirmed=True,
+        )
+        if render_mcp_error(f"{operation}_record", result):
+            verb = "归档" if operation == "archive" else "恢复"
+            st.session_state["record_update_notice"] = f"记录已{verb}。"
+            st.session_state.pop("record_lifecycle_preview", None)
+            st.session_state.pop("editing_record_id", None)
+            st.session_state.pop("natural_edit_record_id", None)
+            st.rerun()
+        elif (result.get("error") or {}).get("code") == "version_conflict":
+            st.session_state.pop("record_lifecycle_preview", None)
+    if actions[1].button("取消", key="cancel_record_lifecycle"):
+        st.session_state.pop("record_lifecycle_preview", None)
+        st.rerun()
 
 
 def render_saved_record_editor(
@@ -1314,8 +1442,10 @@ def _render_saved_record_update_preview(
     if duplicates:
         st.warning("发现疑似重复记录")
         for duplicate in duplicates:
+            marker = " · 已归档" if duplicate.get("archived") else ""
             st.write(
-                f"{duplicate['title']} · {duplicate['score']:.2f} · {duplicate['reason']}"
+                f"{duplicate['title']} · {duplicate['score']:.2f} · "
+                f"{duplicate['reason']}{marker}"
             )
         duplicate_confirmed = st.checkbox(
             "我确认仍要更新这条疑似重复记录",
@@ -1441,6 +1571,8 @@ def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
             "save_record",
             "update_record",
             "update_record_status",
+            "archive_record",
+            "restore_record",
             "create_reminder",
             "snooze_reminder",
             "cancel_reminder",

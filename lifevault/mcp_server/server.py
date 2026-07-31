@@ -95,6 +95,7 @@ def create_server(
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 50,
+        archive_scope: str = "active",
     ) -> dict[str, Any]:
         try:
             parsed_types = [RecordType(item) for item in record_types] if record_types else None
@@ -105,6 +106,7 @@ def create_server(
                 date_from=_parse_date(date_from),
                 date_to=_parse_date(date_to),
                 limit=limit,
+                archive_scope=archive_scope,
             )
             return _ok(records=[_model(record) for record in records])
         except (ValidationError, ValueError) as exc:
@@ -403,6 +405,150 @@ def create_server(
                 params=audit_params,
             )
             return _fail("update_record_status_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Preview archiving a record and cancelling its active reminders.")
+    def preview_record_archive(
+        record_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        try:
+            preview = repo.preview_record_archive(
+                user_id,
+                record_id,
+                expected_version,
+                now_in_timezone(active_settings.default_timezone),
+            )
+            return _ok(**preview.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            return _record_update_failure(exc)
+        except Exception:
+            return _fail("preview_record_archive_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Archive a record atomically after explicit confirmation.")
+    def archive_record(
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        if not user_confirmed:
+            audit_mcp_failure(
+                "archive_record",
+                "rejected",
+                "confirmation_required",
+                target_id=record_id,
+            )
+            return _fail(
+                "confirmation_required",
+                "Archiving a record requires user_confirmed=true.",
+            )
+        if not idempotency_key:
+            audit_mcp_failure(
+                "archive_record",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=record_id,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
+        try:
+            result = repo.archive_record(
+                user_id,
+                record_id,
+                expected_version,
+                idempotency_key,
+                now_in_timezone(active_settings.default_timezone),
+                actor="mcp",
+            )
+            return _ok(**result.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            if exc.code != "no_changes":
+                audit_mcp_failure(
+                    "archive_record",
+                    _record_update_result_type(exc.code),
+                    exc.code,
+                    target_id=record_id,
+                )
+            return _record_update_failure(exc)
+        except Exception:
+            audit_mcp_failure(
+                "archive_record",
+                "failed",
+                "internal_error",
+                target_id=record_id,
+            )
+            return _fail("archive_record_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Preview restoring an archived record without recreating reminders.")
+    def preview_record_restore(
+        record_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        try:
+            preview = repo.preview_record_restore(
+                user_id,
+                record_id,
+                expected_version,
+                now_in_timezone(active_settings.default_timezone),
+            )
+            return _ok(**preview.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            return _record_update_failure(exc)
+        except Exception:
+            return _fail("preview_record_restore_failed", "Tool execution failed.")
+
+    @mcp.tool(description="Restore an archived record after explicit confirmation.")
+    def restore_record(
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        user_confirmed: bool,
+    ) -> dict[str, Any]:
+        if not user_confirmed:
+            audit_mcp_failure(
+                "restore_record",
+                "rejected",
+                "confirmation_required",
+                target_id=record_id,
+            )
+            return _fail(
+                "confirmation_required",
+                "Restoring a record requires user_confirmed=true.",
+            )
+        if not idempotency_key:
+            audit_mcp_failure(
+                "restore_record",
+                "rejected",
+                "missing_idempotency_key",
+                target_id=record_id,
+            )
+            return _fail("missing_idempotency_key", "idempotency_key is required.")
+        try:
+            result = repo.restore_record(
+                user_id,
+                record_id,
+                expected_version,
+                idempotency_key,
+                now_in_timezone(active_settings.default_timezone),
+                actor="mcp",
+            )
+            return _ok(**result.model_dump(mode="json"))
+        except RecordUpdateError as exc:
+            if exc.code != "no_changes":
+                audit_mcp_failure(
+                    "restore_record",
+                    _record_update_result_type(exc.code),
+                    exc.code,
+                    target_id=record_id,
+                )
+            return _record_update_failure(exc)
+        except Exception:
+            audit_mcp_failure(
+                "restore_record",
+                "failed",
+                "internal_error",
+                target_id=record_id,
+            )
+            return _fail("restore_record_failed", "Tool execution failed.")
 
     @mcp.tool(description="Update selected preferences after explicit user confirmation.")
     def update_preferences(
@@ -783,6 +929,12 @@ def _record_update_failure(exc: RecordUpdateError) -> dict[str, Any]:
             for candidate in exc.duplicate_candidates
         ]
     return _fail(exc.code, str(exc), **details)
+
+
+def _record_update_result_type(code: str) -> str:
+    if code in {"version_conflict", "reminder_in_flight", "idempotency_conflict"}:
+        return "failed"
+    return "rejected"
 
 
 if __name__ == "__main__":

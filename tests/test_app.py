@@ -15,6 +15,47 @@ from lifevault.storage.repository import VaultRepository
 
 
 class StreamlitAppTest(unittest.TestCase):
+    def test_archive_and_restore_views_require_preview_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            st.cache_resource.clear()
+            database_path = Path(tmp) / "archive-view.db"
+            graph_path = Path(tmp) / "archive-view-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(record_type="bill", title="停车费"),
+                "archive-view-record",
+            )
+            environment = {
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            with patch.dict(os.environ, environment):
+                app = AppTest.from_file("lifevault/app/main.py").run(timeout=15)
+                _button(app, "归档").click()
+                app.run(timeout=15)
+                self.assertIsNone(repo.get_record("local", record.id).archived_at)
+                self.assertIn("record_lifecycle_preview", app.session_state)
+
+                _button(app, "确认归档").click()
+                app.run(timeout=15)
+                self.assertIsNotNone(repo.get_record("local", record.id).archived_at)
+
+                app = AppTest.from_file("lifevault/app/main.py").run(timeout=15)
+                _widget(app.radio, "记录视图").set_value("archived")
+                app.run(timeout=15)
+                _button(app, "恢复记录").click()
+                app.run(timeout=15)
+                self.assertIsNotNone(repo.get_record("local", record.id).archived_at)
+                _button(app, "确认恢复").click()
+                app.run(timeout=15)
+                self.assertEqual(list(app.exception), [])
+
+            restored = repo.get_record("local", record.id)
+            self.assertIsNone(restored.archived_at)
+            self.assertEqual(restored.version, 3)
+
     def test_natural_edit_from_record_requires_preview_and_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             st.cache_resource.clear()

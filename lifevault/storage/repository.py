@@ -12,6 +12,8 @@ from lifevault.models.schemas import (
     DuplicateCandidate,
     LifeRecord,
     LifeRecordCreate,
+    RecordLifecyclePreview,
+    RecordLifecycleResult,
     RecordStatus,
     RecordStatusUpdatePreview,
     RecordStatusUpdateResult,
@@ -30,6 +32,8 @@ from lifevault.models.schemas import (
 )
 from lifevault.records.update_planner import (
     RecordUpdateError,
+    plan_record_archive,
+    plan_record_restore,
     plan_record_update,
     plan_record_status_update,
     update_needs_duplicate_confirmation,
@@ -240,9 +244,17 @@ class VaultRepository:
         date_from: date | None = None,
         date_to: date | None = None,
         limit: int = 50,
+        archive_scope: str = "active",
     ) -> list[LifeRecord]:
+        if archive_scope not in {"active", "archived", "all"}:
+            raise ValueError("archive_scope must be active, archived, or all.")
         sql = "SELECT * FROM life_records WHERE user_id = ?"
         params: list[Any] = [user_id]
+
+        if archive_scope == "active":
+            sql += " AND archived_at IS NULL"
+        elif archive_scope == "archived":
+            sql += " AND archived_at IS NOT NULL"
 
         if record_types:
             placeholders = ",".join("?" for _ in record_types)
@@ -271,7 +283,10 @@ class VaultRepository:
             sql += " AND (title LIKE ? OR details_json LIKE ? OR source_text_preview LIKE ?)"
             params.extend([like, like, like])
 
-        sql += " ORDER BY COALESCE(deadline, event_date, created_at) ASC LIMIT ?"
+        if archive_scope == "archived":
+            sql += " ORDER BY archived_at DESC, updated_at DESC LIMIT ?"
+        else:
+            sql += " ORDER BY COALESCE(deadline, event_date, created_at) ASC LIMIT ?"
         params.append(limit)
 
         with connect(self.database_path) as conn:
@@ -299,6 +314,7 @@ class VaultRepository:
                 WHERE user_id = ?
                   AND type = ?
                   AND status != ?
+                  AND archived_at IS NULL
                   AND deadline IS NOT NULL
                   AND deadline >= ?
                   AND deadline <= ?
@@ -335,6 +351,7 @@ class VaultRepository:
                 WHERE records.user_id = ?
                   AND records.type = ?
                   AND records.status = ?
+                  AND records.archived_at IS NULL
                   AND records.deadline IS NOT NULL
                   AND records.deadline < ?
                   AND (
@@ -396,6 +413,7 @@ class VaultRepository:
             if (
                 record.record_type != RecordType.SUBSCRIPTION
                 or record.status != RecordStatus.ACTIVE
+                or record.archived_at is not None
                 or record.details.get("auto_renew") is not True
                 or billing_cycle not in {"monthly", "yearly", "weekly"}
                 or record.deadline is None
@@ -519,12 +537,11 @@ class VaultRepository:
     ) -> list[DuplicateCandidate]:
         sql = """
             SELECT * FROM life_records
-            WHERE user_id = ? AND type = ? AND status != ?
+            WHERE user_id = ? AND type = ?
         """
         params: list[Any] = [
             user_id,
             record.record_type.value,
-            RecordStatus.CANCELLED.value,
         ]
         if exclude_record_id is not None:
             sql += " AND id != ?"
@@ -568,6 +585,7 @@ class VaultRepository:
                         title=existing.title,
                         reason="，".join(reasons),
                         score=min(score, 1.0),
+                        archived=existing.archived_at is not None,
                     )
                 )
 
@@ -590,6 +608,12 @@ class VaultRepository:
             if not row:
                 raise RecordUpdateError("record_not_found", "Record not found.")
             current = self._row_to_record(row)
+            if current.archived_at is not None:
+                raise RecordUpdateError(
+                    "record_archived",
+                    "Archived records must be restored before editing.",
+                    current_record=current,
+                )
             if current.version != expected_version:
                 raise RecordUpdateError(
                     "version_conflict",
@@ -666,6 +690,12 @@ class VaultRepository:
             if not row:
                 raise RecordUpdateError("record_not_found", "Record not found.")
             current = self._row_to_record(row)
+            if current.archived_at is not None:
+                raise RecordUpdateError(
+                    "record_archived",
+                    "Archived records must be restored before editing.",
+                    current_record=current,
+                )
             if current.version != expected_version:
                 raise RecordUpdateError(
                     "version_conflict",
@@ -873,6 +903,12 @@ class VaultRepository:
             if not row:
                 raise RecordUpdateError("record_not_found", "Record not found.")
             current = self._row_to_record(row)
+            if current.archived_at is not None:
+                raise RecordUpdateError(
+                    "record_archived",
+                    "Archived records must be restored before editing.",
+                    current_record=current,
+                )
             if current.version != expected_version:
                 raise RecordUpdateError(
                     "version_conflict",
@@ -924,6 +960,12 @@ class VaultRepository:
             if not row:
                 raise RecordUpdateError("record_not_found", "Record not found.")
             current = self._row_to_record(row)
+            if current.archived_at is not None:
+                raise RecordUpdateError(
+                    "record_archived",
+                    "Archived records must be restored before editing.",
+                    current_record=current,
+                )
             if current.version != expected_version:
                 raise RecordUpdateError(
                     "version_conflict",
@@ -1016,6 +1058,246 @@ class VaultRepository:
                 ),
             )
             return result
+
+    def preview_record_archive(
+        self,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        now: datetime,
+    ) -> RecordLifecyclePreview:
+        with connect(self.database_path) as conn:
+            current = self._get_record_for_lifecycle_conn(
+                conn, user_id, record_id, expected_version
+            )
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            return plan_record_archive(current, reminders, now)
+
+    def archive_record(
+        self,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+        actor: str = "user",
+    ) -> RecordLifecycleResult:
+        return self._update_record_lifecycle(
+            user_id=user_id,
+            record_id=record_id,
+            expected_version=expected_version,
+            idempotency_key=idempotency_key,
+            now=now,
+            operation="archive_record",
+            actor=actor,
+        )
+
+    def preview_record_restore(
+        self,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        now: datetime,
+    ) -> RecordLifecyclePreview:
+        with connect(self.database_path) as conn:
+            current = self._get_record_for_lifecycle_conn(
+                conn, user_id, record_id, expected_version
+            )
+            return plan_record_restore(current, now)
+
+    def restore_record(
+        self,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+        actor: str = "user",
+    ) -> RecordLifecycleResult:
+        return self._update_record_lifecycle(
+            user_id=user_id,
+            record_id=record_id,
+            expected_version=expected_version,
+            idempotency_key=idempotency_key,
+            now=now,
+            operation="restore_record",
+            actor=actor,
+        )
+
+    def _update_record_lifecycle(
+        self,
+        *,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        now: datetime,
+        operation: str,
+        actor: str,
+    ) -> RecordLifecycleResult:
+        request_hash = stable_key(
+            "record-lifecycle-request",
+            user_id,
+            record_id,
+            expected_version,
+            operation,
+        )
+        with connect(self.database_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                """
+                SELECT request_hash, result_json
+                FROM record_lifecycle_operations
+                WHERE user_id = ? AND idempotency_key = ?
+                """,
+                (user_id, idempotency_key),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RecordUpdateError(
+                        "idempotency_conflict",
+                        "idempotency_key was already used for a different lifecycle update.",
+                    )
+                return RecordLifecycleResult.model_validate_json(previous["result_json"])
+
+            current = self._get_record_for_lifecycle_conn(
+                conn, user_id, record_id, expected_version
+            )
+            reminders = self._list_record_reminders_conn(conn, user_id, record_id)
+            if operation == "archive_record":
+                preview = plan_record_archive(current, reminders, now)
+            elif operation == "restore_record":
+                preview = plan_record_restore(current, now)
+            else:
+                raise ValueError("Unsupported lifecycle operation.")
+
+            updated_at = preview.record.updated_at.isoformat()
+            archived_at = _dt_to_text(preview.record.archived_at)
+            cursor = conn.execute(
+                """
+                UPDATE life_records
+                SET archived_at = ?, version = version + 1, updated_at = ?
+                WHERE user_id = ? AND id = ? AND version = ?
+                """,
+                (archived_at, updated_at, user_id, record_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                latest_row = conn.execute(
+                    "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                    (user_id, record_id),
+                ).fetchone()
+                raise RecordUpdateError(
+                    "version_conflict",
+                    "Record version conflict.",
+                    current_record=self._row_to_record(latest_row) if latest_row else None,
+                )
+
+            reminder_ids = [reminder.id for reminder in preview.reminders_to_cancel]
+            if reminder_ids:
+                placeholders = ",".join("?" for _ in reminder_ids)
+                conn.execute(
+                    f"""
+                    UPDATE reminders
+                    SET status = ?, updated_at = ?
+                    WHERE user_id = ? AND id IN ({placeholders}) AND status IN (?, ?)
+                    """,
+                    [
+                        ReminderStatus.CANCELLED.value,
+                        updated_at,
+                        user_id,
+                        *reminder_ids,
+                        ReminderStatus.PENDING.value,
+                        ReminderStatus.SNOOZED.value,
+                    ],
+                )
+            cancelled_rows = [
+                conn.execute(
+                    "SELECT * FROM reminders WHERE user_id = ? AND id = ?",
+                    (user_id, reminder_id),
+                ).fetchone()
+                for reminder_id in reminder_ids
+            ]
+
+            params: dict[str, Any] = {
+                "old_version": expected_version,
+                "new_version": expected_version + 1,
+            }
+            if operation == "archive_record":
+                params.update(
+                    {
+                        "cancelled_reminder_count": len(cancelled_rows),
+                        "reminder_types": sorted(
+                            {
+                                row["reminder_type"]
+                                for row in cancelled_rows
+                                if row is not None
+                            }
+                        ),
+                    }
+                )
+            self._audit_conn(
+                conn,
+                user_id=user_id,
+                actor=actor,
+                action=operation,
+                target_id=record_id,
+                result="ok",
+                params=params,
+            )
+            updated_row = conn.execute(
+                "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+                (user_id, record_id),
+            ).fetchone()
+            result = RecordLifecycleResult(
+                record=self._row_to_record(updated_row),
+                operation=operation,
+                cancelled_reminders=[
+                    self._row_to_reminder(row)
+                    for row in cancelled_rows
+                    if row is not None
+                ],
+                warnings=preview.warnings,
+            )
+            conn.execute(
+                """
+                INSERT INTO record_lifecycle_operations(
+                    user_id, idempotency_key, request_hash, operation,
+                    record_id, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    idempotency_key,
+                    request_hash,
+                    operation,
+                    record_id,
+                    result.model_dump_json(),
+                    updated_at,
+                ),
+            )
+            return result
+
+    def _get_record_for_lifecycle_conn(
+        self,
+        conn: Any,
+        user_id: str,
+        record_id: str,
+        expected_version: int,
+    ) -> LifeRecord:
+        row = conn.execute(
+            "SELECT * FROM life_records WHERE user_id = ? AND id = ?",
+            (user_id, record_id),
+        ).fetchone()
+        if not row:
+            raise RecordUpdateError("record_not_found", "Record not found.")
+        current = self._row_to_record(row)
+        if current.version != expected_version:
+            raise RecordUpdateError(
+                "version_conflict",
+                "Record version conflict.",
+                current_record=current,
+            )
+        return current
 
     def _list_record_reminders_conn(
         self,
@@ -1626,6 +1908,7 @@ class VaultRepository:
             source_text_preview=row["source_text_preview"],
             created_at=_parse_datetime(row["created_at"]),
             updated_at=_parse_datetime(row["updated_at"]),
+            archived_at=_parse_datetime(row["archived_at"]),
         )
 
     def _row_to_reminder(self, row: Any) -> Reminder:

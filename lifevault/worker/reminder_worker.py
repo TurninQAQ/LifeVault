@@ -45,7 +45,11 @@ class ReminderWorker:
                 self.repository.mark_reminder_failed(self.settings.default_user_id, reminder.id, "record_not_found")
                 processed += 1
                 continue
-            if not _record_allows_reminder(record.record_type, record.status, reminder.reminder_type):
+            if record.archived_at is not None or not _record_allows_reminder(
+                record.record_type,
+                record.status,
+                reminder.reminder_type,
+            ):
                 self.repository.mark_reminder_cancelled_by_worker(
                     self.settings.default_user_id,
                     reminder.id,

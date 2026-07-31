@@ -15,6 +15,69 @@ from lifevault.storage.repository import VaultRepository
 
 
 class CliCorrectionTest(unittest.TestCase):
+    def test_archive_and_restore_commands_preview_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            database_path = Path(tmp) / "cli-lifecycle.db"
+            graph_path = Path(tmp) / "cli-lifecycle-graph.db"
+            repo = VaultRepository(database_path)
+            record = repo.save_record(
+                "local",
+                LifeRecordCreate(record_type="bill", title="停车费"),
+                "cli-lifecycle-record",
+            )
+            environment = {
+                **os.environ,
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(graph_path),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            root = Path(__file__).resolve().parents[1]
+            dry_run = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "lifevault.cli",
+                    "archive",
+                    record.id,
+                    "1",
+                    "--dry-run",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIsNone(repo.get_record("local", record.id).archived_at)
+
+            archived = subprocess.run(
+                [sys.executable, "-m", "lifevault.cli", "archive", record.id, "1", "--yes"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(archived.returncode, 0, archived.stderr)
+            self.assertIn("Archived", archived.stdout)
+            self.assertIsNotNone(repo.get_record("local", record.id).archived_at)
+
+            restored = subprocess.run(
+                [sys.executable, "-m", "lifevault.cli", "restore", record.id, "2", "--yes"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+            self.assertIn("Restored", restored.stdout)
+            self.assertIsNone(repo.get_record("local", record.id).archived_at)
+
     def test_natural_edit_and_status_commands_require_confirmed_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database_path = Path(tmp) / "cli-natural.db"

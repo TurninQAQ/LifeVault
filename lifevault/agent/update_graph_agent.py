@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from typing import Any, Literal, TypedDict
@@ -45,7 +46,9 @@ class RecordUpdateGraphState(TypedDict, total=False):
     selected_record_type: str
     selected_version: int
     selected_summary: dict[str, Any]
-    operation: Literal["content_update", "status_update"]
+    operation: Literal[
+        "content_update", "status_update", "archive_record", "restore_record"
+    ]
     changes: dict[str, Any]
     target_status: str
     frozen_at: str
@@ -184,11 +187,23 @@ class RecordUpdateGraphAgent:
         now = now_in_timezone(self.settings.default_timezone)
         text = state["sanitized_input"]
         target, warnings = self.extractor.extract_target(text, now)
-        while not state.get("preselected_record_id") and not _has_target_clue(target):
+        lifecycle_operation = (
+            target.operation
+            if target.operation in {"archive_record", "restore_record"}
+            else None
+        )
+        lifecycle_ambiguous = _requires_lifecycle_clarification(text, target)
+        while (
+            not state.get("preselected_record_id") and not _has_target_clue(target)
+        ) or lifecycle_ambiguous:
             payload = interrupt(
                 {
                     "type": "missing_target",
-                    "prompt": "请补充要修改的记录名称、类型或日期。",
+                    "prompt": (
+                        "请明确是恢复归档记录、取消归档，还是其他修改，并写出记录名称。"
+                        if lifecycle_ambiguous
+                        else "请补充要修改的记录名称、类型或日期。"
+                    ),
                 }
             )
             if _payload_action(payload) == "cancel":
@@ -197,7 +212,14 @@ class RecordUpdateGraphAgent:
             if not supplement:
                 continue
             target, extra_warnings = self.extractor.extract_target(supplement, now)
+            target, lifecycle_operation = _preserve_lifecycle_operation(
+                target,
+                lifecycle_operation,
+            )
             warnings.extend(extra_warnings)
+            lifecycle_ambiguous = (
+                lifecycle_ambiguous and target.operation == "unknown"
+            ) or _requires_lifecycle_clarification(supplement, target)
 
         if target.operation == "external_action":
             return {
@@ -226,6 +248,11 @@ class RecordUpdateGraphAgent:
 
         now = now_in_timezone(self.settings.default_timezone)
         target = RecordTargetQuery.model_validate(state["target_query"])
+        lifecycle_operation = (
+            target.operation
+            if target.operation in {"archive_record", "restore_record"}
+            else None
+        )
         while True:
             date_from, date_to = target_date_range(
                 target.target_date_text,
@@ -238,6 +265,9 @@ class RecordUpdateGraphAgent:
                 date_from=date_from,
                 date_to=date_to,
                 limit=10,
+                archive_scope=(
+                    "archived" if target.operation == "restore_record" else "active"
+                ),
             )
             if not result.get("ok"):
                 return _mcp_cancelled(state, "search_records", result)
@@ -261,6 +291,10 @@ class RecordUpdateGraphAgent:
             if not supplement:
                 continue
             target, warnings = self.extractor.extract_target(supplement, now)
+            target, lifecycle_operation = _preserve_lifecycle_operation(
+                target,
+                lifecycle_operation,
+            )
             if target.operation == "external_action":
                 return _cancelled(state, "External actions are not supported.")
             if warnings:
@@ -289,6 +323,15 @@ class RecordUpdateGraphAgent:
 
     def _extract_update_node(self, state: RecordUpdateGraphState) -> dict[str, Any]:
         frozen_at = now_in_timezone(self.settings.default_timezone)
+        target = RecordTargetQuery.model_validate(state["target_query"])
+        if target.operation in {"archive_record", "restore_record"}:
+            return {
+                "operation": target.operation,
+                "changes": {},
+                "frozen_at": frozen_at.isoformat(),
+                "field_errors": {},
+                "stage": "update_preview",
+            }
         record_type = RecordType(state["selected_record_type"])
         intent, warnings = self.extractor.extract_update(
             state["sanitized_input"],
@@ -398,7 +441,17 @@ class RecordUpdateGraphAgent:
         current = current_result["record"]
         version = int(current["version"])
         operation = state["operation"]
-        if operation == "status_update":
+        if operation == "archive_record":
+            result = self.mcp_client.preview_record_archive(
+                state["selected_record_id"],
+                version,
+            )
+        elif operation == "restore_record":
+            result = self.mcp_client.preview_record_restore(
+                state["selected_record_id"],
+                version,
+            )
+        elif operation == "status_update":
             result = self.mcp_client.preview_record_status_update(
                 state["selected_record_id"],
                 state["target_status"],
@@ -461,6 +514,7 @@ class RecordUpdateGraphAgent:
                 "target_status": state.get("target_status"),
                 "date_sources": state.get("date_sources", {}),
                 "preview": state.get("preview_summary", {}),
+                "recoverable": state.get("operation") == "archive_record",
                 "duplicate_candidates": state.get("duplicate_candidates", []),
                 "field_errors": state.get("field_errors", {}),
             }
@@ -471,6 +525,12 @@ class RecordUpdateGraphAgent:
         if action == "confirm":
             return {"confirmed": True, "stage": "applying_update"}
         if action == "apply" and isinstance(payload, dict):
+            if state.get("operation") in {"archive_record", "restore_record"}:
+                return {
+                    "field_errors": {"action": ["Lifecycle actions can only be confirmed or cancelled."]},
+                    "correction_requested": True,
+                    "stage": "update_confirmation",
+                }
             if state.get("operation") == "status_update":
                 try:
                     status = RecordStatus(str(payload.get("target_status", "")))
@@ -541,9 +601,24 @@ class RecordUpdateGraphAgent:
             state["thread_id"],
             record_id,
             version,
+            operation,
             payload_key,
         )
-        if operation == "status_update":
+        if operation == "archive_record":
+            result = self.mcp_client.archive_record(
+                record_id,
+                version,
+                idempotency_key,
+                user_confirmed=True,
+            )
+        elif operation == "restore_record":
+            result = self.mcp_client.restore_record(
+                record_id,
+                version,
+                idempotency_key,
+                user_confirmed=True,
+            )
+        elif operation == "status_update":
             result = self.mcp_client.update_record_status(
                 record_id,
                 state["target_status"],
@@ -640,6 +715,7 @@ class RecordUpdateGraphAgent:
             selected_record_id=state.get("selected_record_id"),
             record=record,
             changes=state.get("changes", {}),
+            operation=state.get("operation"),
             target_status=state.get("target_status"),
             preview=state.get("preview_summary"),
             updated_record_id=state.get("updated_record_id"),
@@ -708,6 +784,29 @@ def _has_target_clue(target: RecordTargetQuery) -> bool:
     return bool(target.query or target.record_type or target.target_date_text)
 
 
+def _requires_lifecycle_clarification(
+    text: str,
+    target: RecordTargetQuery,
+) -> bool:
+    return target.operation == "unknown" and bool(
+        re.search(r"(?:恢复|找回|取消归档|归档|删除|删掉|移除)", text)
+    )
+
+
+def _preserve_lifecycle_operation(
+    target: RecordTargetQuery,
+    previous_operation: str | None,
+) -> tuple[RecordTargetQuery, str | None]:
+    if target.operation in {"archive_record", "restore_record"}:
+        return target, target.operation
+    if (
+        target.operation == "unknown"
+        and previous_operation in {"archive_record", "restore_record"}
+    ):
+        return target.model_copy(update={"operation": previous_operation}), previous_operation
+    return target, previous_operation
+
+
 def _selected_record_state(record: dict[str, Any], stage: str) -> dict[str, Any]:
     return {
         "selected_record_id": str(record["id"]),
@@ -729,6 +828,7 @@ def _record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "event_date": record.get("event_date"),
         "deadline": record.get("deadline"),
         "version": record.get("version"),
+        "archived_at": record.get("archived_at"),
     }
 
 
@@ -746,6 +846,9 @@ def _preview_summary(result: dict[str, Any], operation: str) -> dict[str, Any]:
                 "created_reminder_count": len(result.get("reminders_to_create") or []),
             }
         )
+    elif operation in {"archive_record", "restore_record"}:
+        summary["recoverable"] = bool(result.get("recoverable", True))
+        summary["operation"] = operation
     return summary
 
 

@@ -188,6 +188,72 @@ class RecordUpdateGraphAgentTest(unittest.TestCase):
             self.assertEqual(corrected.selected_record_id, record.id)
             agent.close()
 
+    def test_archive_and_restore_use_target_extraction_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, repo = self.make_services(tmp)
+            record = self.seed_subscription(repo)
+
+            with patch.object(
+                agent.extractor,
+                "extract_update",
+                side_effect=AssertionError("lifecycle must skip patch extraction"),
+            ):
+                turn = agent.start("归档 ChatGPT Plus 会员记录")
+                self.assertEqual(turn.interrupt_type, "target_selection")
+                turn = agent.resume(turn.thread_id, {"record_id": record.id})
+                self.assertEqual(turn.operation, "archive_record")
+                self.assertEqual(turn.interrupt_type, "update_confirmation")
+                turn = agent.resume(turn.thread_id, {"action": "confirm"})
+                self.assertEqual(turn.status, "completed")
+
+            archived = repo.get_record("local", record.id)
+            self.assertIsNotNone(archived.archived_at)
+            restore = agent.start("取消归档 ChatGPT Plus 会员记录")
+            self.assertEqual([item["id"] for item in restore.candidates], [record.id])
+            restore = agent.resume(restore.thread_id, {"record_id": record.id})
+            self.assertEqual(restore.operation, "restore_record")
+            restore = agent.resume(restore.thread_id, {"action": "confirm"})
+            self.assertEqual(restore.status, "completed")
+            self.assertIsNone(repo.get_record("local", record.id).archived_at)
+            agent.close()
+
+    def test_ambiguous_lifecycle_language_requires_explicit_clarification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            agent, repo = self.make_services(tmp)
+            record = self.seed_subscription(repo)
+            bill = repo.save_record(
+                "local",
+                LifeRecordCreate(record_type="bill", title="停车费"),
+                "ambiguous-bill",
+            )
+            archive = agent.start("归档这条记录")
+            self.assertEqual(archive.interrupt_type, "missing_target")
+            archive = agent.resume(archive.thread_id, {"text": "停车费"})
+            self.assertEqual(archive.interrupt_type, "target_selection")
+            self.assertEqual([item["id"] for item in archive.candidates], [bill.id])
+            repo.archive_record(
+                "local",
+                record.id,
+                1,
+                "ambiguous-seed-archive",
+                datetime(2026, 7, 31, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            )
+
+            restore = agent.start("恢复 ChatGPT Plus")
+            self.assertEqual(restore.interrupt_type, "missing_target")
+            restore = agent.resume(restore.thread_id, {"text": "ChatGPT Plus"})
+            self.assertEqual(restore.interrupt_type, "missing_target")
+            restore = agent.resume(
+                restore.thread_id,
+                {"text": "取消归档 ChatGPT Plus 会员记录"},
+            )
+            self.assertEqual(restore.interrupt_type, "target_selection")
+            self.assertEqual([item["id"] for item in restore.candidates], [record.id])
+
+            delete = agent.start("删除它")
+            self.assertEqual(delete.interrupt_type, "missing_target")
+            agent.close()
+
 
 if __name__ == "__main__":
     unittest.main()

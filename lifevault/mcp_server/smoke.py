@@ -292,6 +292,56 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     },
                 )
                 require_ok("update_record_status", update_status_result)
+                archive_preview = await call_json(
+                    session,
+                    "preview_record_archive",
+                    {"record_id": record_id, "expected_version": 3},
+                )
+                require_ok("preview_record_archive", archive_preview)
+                rejected_archive = await call_json(
+                    session,
+                    "archive_record",
+                    {
+                        "record_id": record_id,
+                        "expected_version": 3,
+                        "idempotency_key": f"mcp-smoke-archive-rejected-{run_id}",
+                        "user_confirmed": False,
+                    },
+                )
+                archive_result = await call_json(
+                    session,
+                    "archive_record",
+                    {
+                        "record_id": record_id,
+                        "expected_version": 3,
+                        "idempotency_key": f"mcp-smoke-archive-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("archive_record", archive_result)
+                archived_search = await call_json(
+                    session,
+                    "search_records",
+                    {"query": record_payload["title"], "archive_scope": "archived"},
+                )
+                require_ok("search_records archived", archived_search)
+                restore_preview = await call_json(
+                    session,
+                    "preview_record_restore",
+                    {"record_id": record_id, "expected_version": 4},
+                )
+                require_ok("preview_record_restore", restore_preview)
+                restore_result = await call_json(
+                    session,
+                    "restore_record",
+                    {
+                        "record_id": record_id,
+                        "expected_version": 4,
+                        "idempotency_key": f"mcp-smoke-restore-{run_id}",
+                        "user_confirmed": True,
+                    },
+                )
+                require_ok("restore_record", restore_result)
                 audit_result = await call_json(session, "list_audit_logs", {"limit": 100})
                 require_ok("list_audit_logs", audit_result)
                 audit_logs = audit_result["audit_logs"]
@@ -324,6 +374,12 @@ async def run_smoke(database_path: Path | None = None, cwd: Path | None = None) 
                     "accepted_cancel": accepted_cancel,
                     "status_preview_version": status_preview["record"]["version"],
                     "updated_record_status": update_status_result["record"]["status"],
+                    "archive_preview_version": archive_preview["record"]["version"],
+                    "archived_record_version": archive_result["record"]["version"],
+                    "archived_search_count": len(archived_search["records"]),
+                    "restore_preview_version": restore_preview["record"]["version"],
+                    "restored_record_version": restore_result["record"]["version"],
+                    "rejected_archive": rejected_archive,
                     "audit_count": len(audit_logs),
                     "audit_rejected_count": sum(log["result"] == "rejected" for log in audit_logs),
                 }
