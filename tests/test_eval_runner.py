@@ -4,9 +4,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lifevault.config import Settings
 from lifevault.eval.runner import format_summary, load_cases, run_eval, write_json_report
+from lifevault.models.schemas import ExtractedRecordCandidate
 
 
 class EvalRunnerTest(unittest.TestCase):
@@ -67,6 +69,31 @@ class EvalRunnerTest(unittest.TestCase):
             report = {"summary": {"total": 0}, "cases": []}
             write_json_report(report, out)
             self.assertEqual(json.loads(out.read_text(encoding="utf-8")), report)
+
+    def test_use_qwen_flag_overrides_disabled_runtime_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "case.jsonl"
+            path.write_text(
+                '{"id":"qwen","text":"anything","expected":{"intent":"unknown"}}\n',
+                encoding="utf-8",
+            )
+            settings = Settings(
+                database_path=root / "eval.db",
+                backup_dir=root / "custom-backups",
+                use_qwen=False,
+            )
+            with patch("lifevault.eval.runner.Extractor") as extractor_class:
+                extractor_class.return_value.extract_record.return_value = (
+                    ExtractedRecordCandidate(intent="unknown"),
+                    [],
+                )
+                report = run_eval(settings, examples_path=path, use_qwen=True)
+
+            eval_settings = extractor_class.call_args.args[0]
+            self.assertTrue(eval_settings.use_qwen)
+            self.assertEqual(eval_settings.backup_dir, root / "custom-backups")
+            self.assertTrue(report["use_qwen"])
 
     def test_invalid_case_fails_fast(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

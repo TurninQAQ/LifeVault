@@ -1,8 +1,9 @@
 # LifeVault
 
-LifeVault v0.19 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v1.0 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
+Release evidence and operational boundaries are documented in [the v1.0 audit](docs/V1_RELEASE_AUDIT.md), [the three-minute demo](docs/DEMO.md), [the changelog](CHANGELOG.md), and [the security policy](SECURITY.md).
 
 ## Current MVP
 
@@ -180,6 +181,14 @@ v0.19 makes the source tree an installable and relocatable local application:
 - Purchase, subscription, and bill Skills plus both JSONL evaluation sets are packaged into the wheel. Qwen now loads only the selected record-type Skill for create-record extraction; search extraction loads none.
 - Explicit values found by deterministic parsing constrain Qwen output without discarding model-only fields. This canonicalizes titles/date text and prevents invented reminder intent; the configured local Qwen passes all 72 extraction cases and 448 expected fields.
 
+v1.0 closes the release-readiness loop:
+
+- `lifevault doctor` performs read-only checks for Python/platform support, direct dependency ranges, packaged Skills/evaluation data, writable state paths, SQLite integrity/schema compatibility, pending restore recovery, Worker pause state, and the configured local Qwen model. `--json` supports automation and `--strict` turns warnings into a release failure.
+- The final wheel is tested with a complete dependency installation outside the repository, not only against the development environment.
+- Browser-driven desktop and mobile checks verify that the Streamlit add, records, reminders, and backup views finish rendering without blank output, skeleton residue, or overlapping controls.
+- `CHANGELOG.md`, `SECURITY.md`, a requirement-by-requirement release audit, and a reproducible three-minute demo define what v1.0 proves and what remains outside the local MVP.
+- v1.0 supports Python 3.10+ on POSIX systems with `fcntl.flock`. The UI remains loopback-only and must not be exposed as an unauthenticated remote service.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -213,10 +222,13 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
 lifevault init-db
+lifevault doctor --strict
 lifevault serve
 ```
 
 `lifevault serve` prints the local URL, starts the Reminder Worker, and keeps both processes under one supervisor. Use `--no-worker` for UI-only debugging or `--port 0` to request any free loopback port.
+
+`lifevault doctor` is read-only. On a brand-new install it reports uninitialized databases as warnings; after `init-db`, `doctor --strict` must pass without warnings. Qwen unavailability is a warning because the deterministic fallback remains supported; use `--no-qwen` for an intentionally offline installation.
 
 Source checkouts preserve the existing `./data` default. Installed wheels use a user-owned platform data directory, such as `~/.local/share/lifevault` on Linux. Set one root before startup to make the location explicit:
 
@@ -365,14 +377,26 @@ python3 -m streamlit run lifevault/app/main.py
 ```bash
 python -m unittest discover -s tests -v
 python -m pip wheel . --no-deps --wheel-dir dist
+python -m lifevault.cli doctor --strict
 python -m lifevault.cli eval
 python -m lifevault.cli eval-updates
 python -m lifevault.cli mcp-smoke
 ```
 
+## Release Scope
+
+- Supported runtime: Python 3.10+ on POSIX with local file locking.
+- Supported deployment: one local user, loopback UI, local SQLite, optional local OpenAI-compatible Qwen endpoint.
+- Active databases are plaintext local files; use operating-system permissions and encrypted `.lvbackup` files for portable copies.
+- OCR/PDF import, cloud sync, remote access, multi-user authorization, PostgreSQL, external payment/cancellation, physical deletion, and scheduled/cloud/incremental backup are intentionally outside v1.0.
+- The repository does not currently grant an additional open-source reuse license. Deployment does not require a license file, but redistribution terms should be decided separately by the owner.
+
+See the [three-minute walkthrough](docs/DEMO.md) and its [silent MP4](docs/lifevault-v1-demo.mp4) for a compact product demonstration.
+
 ## Project Shape
 
 - `lifevault/models`: Pydantic schemas and Qwen adapter.
+- `lifevault/diagnostics.py`: read-only install, resource, database, runtime, and Qwen checks.
 - `lifevault/skills`: packaged task instructions loaded selectively for Qwen extraction.
 - `lifevault/eval/data`: packaged extraction and natural-update evaluation sets.
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.

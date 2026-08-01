@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +29,7 @@ def run_eval(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     cases = load_cases(examples_path)
-    eval_settings = settings if use_qwen else _settings_with_qwen(settings, use_qwen=False)
+    eval_settings = _settings_with_qwen(settings, use_qwen=use_qwen)
     extractor = Extractor(eval_settings)
     active_now = now or datetime.now(ZoneInfo(settings.default_timezone))
 
@@ -174,19 +174,7 @@ def _build_report(results: list[dict[str, Any]], examples_path: Path, use_qwen: 
 
 
 def _settings_with_qwen(settings: Settings, use_qwen: bool) -> Settings:
-    return Settings(
-        database_path=settings.database_path,
-        langgraph_checkpoint_path=settings.langgraph_checkpoint_path,
-        qwen_base_url=settings.qwen_base_url,
-        qwen_model=settings.qwen_model,
-        qwen_timeout_seconds=settings.qwen_timeout_seconds,
-        default_user_id=settings.default_user_id,
-        default_timezone=settings.default_timezone,
-        default_reminder_time=settings.default_reminder_time,
-        default_advance_days=settings.default_advance_days,
-        input_max_chars=settings.input_max_chars,
-        use_qwen=use_qwen,
-    )
+    return replace(settings, use_qwen=use_qwen)
 
 
 def _normalize_value(value: Any) -> Any:

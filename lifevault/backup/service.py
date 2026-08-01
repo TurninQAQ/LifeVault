@@ -1321,7 +1321,10 @@ def _validate_manifest_compatibility(manifest: dict[str, Any], settings: Setting
     if manifest["vault_schema_version"] > VAULT_SCHEMA_VERSION:
         raise BackupError("backup_too_new", "This backup uses a newer vault schema.")
     if manifest["vault_schema_version"] != VAULT_SCHEMA_VERSION:
-        raise BackupError("backup_schema_invalid", "This backup schema cannot be migrated by v0.18.")
+        raise BackupError(
+            "backup_schema_invalid",
+            f"This backup schema cannot be migrated by LifeVault {__version__}.",
+        )
     if manifest["user_id"] != settings.default_user_id:
         raise BackupError("user_scope_mismatch", "Backup user does not match the configured user.")
 

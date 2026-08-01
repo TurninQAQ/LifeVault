@@ -35,6 +35,11 @@ def main() -> None:
 
     sub.add_parser("init-db", help="Initialize the SQLite database")
 
+    doctor = sub.add_parser("doctor", help="Run read-only installation and vault diagnostics")
+    doctor.add_argument("--no-qwen", action="store_true", help="Skip the local Qwen network check")
+    doctor.add_argument("--json", action="store_true", help="Print a machine-readable report")
+    doctor.add_argument("--strict", action="store_true", help="Treat warnings as a nonzero result")
+
     serve_cmd = sub.add_parser(
         "serve",
         help="Run the Streamlit UI and Reminder Worker under one local supervisor",
@@ -211,6 +216,18 @@ def main() -> None:
 
     args = parser.parse_args()
     settings = get_settings()
+
+    if args.command == "doctor":
+        from lifevault.diagnostics import format_diagnostics, run_diagnostics
+
+        report = run_diagnostics(settings, check_qwen=not args.no_qwen)
+        if args.json:
+            print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+        else:
+            print(format_diagnostics(report))
+        if not report.ok or (args.strict and report.warnings):
+            raise SystemExit(1)
+        return
 
     try:
         backup_service = BackupService(settings)

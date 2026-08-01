@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -229,19 +229,7 @@ def _flatten(value: dict[str, Any], prefix: str = "") -> dict[str, Any]:
 
 
 def _settings_with_qwen(settings: Settings, use_qwen: bool) -> Settings:
-    return Settings(
-        database_path=settings.database_path,
-        langgraph_checkpoint_path=settings.langgraph_checkpoint_path,
-        qwen_base_url=settings.qwen_base_url,
-        qwen_model=settings.qwen_model,
-        qwen_timeout_seconds=settings.qwen_timeout_seconds,
-        default_user_id=settings.default_user_id,
-        default_timezone=settings.default_timezone,
-        default_reminder_time=settings.default_reminder_time,
-        default_advance_days=settings.default_advance_days,
-        input_max_chars=settings.input_max_chars,
-        use_qwen=use_qwen,
-    )
+    return replace(settings, use_qwen=use_qwen)
 
 
 def _normalize(value: Any) -> Any:
