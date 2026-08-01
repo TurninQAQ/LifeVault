@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lifevault"
-version = "0.17.0"
+version = "0.18.0"
 description = "Local-first life credential and reminder assistant"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
   "langgraph>=1.0,<2",
   "langgraph-checkpoint-sqlite>=3.1,<4",
   "mcp>=1.28,<2",
+  "cryptography>=46.0.3,<50",
 ]
 
 [tool.setuptools.packages.find]

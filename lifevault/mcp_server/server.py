@@ -6,6 +6,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
+from lifevault.backup.service import BackupService
 from lifevault.config import Settings, get_settings
 from lifevault.models.schemas import (
     LifeRecordCreate,
@@ -29,6 +30,7 @@ def create_server(
     repository: VaultRepository | None = None,
 ) -> FastMCP:
     active_settings = settings or get_settings()
+    BackupService(active_settings).recover_if_needed()
     repo = repository or VaultRepository(active_settings.database_path)
     user_id = active_settings.default_user_id
     mcp = FastMCP(

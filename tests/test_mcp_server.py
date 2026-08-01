@@ -36,6 +36,10 @@ class McpServerTest(unittest.TestCase):
             }
             self.assertTrue(result["ok"])
             self.assertTrue(expected_tools.issubset(set(result["tools"])))
+            self.assertFalse(
+                {"backup", "create_backup", "import_backup", "restore_backup"}
+                & set(result["tools"])
+            )
             self.assertGreaterEqual(result["upcoming_subscription_count"], 1)
             self.assertEqual(result["search_count"], 1)
             self.assertTrue(result["get_record_title"].startswith("MCP 测试耳机"))

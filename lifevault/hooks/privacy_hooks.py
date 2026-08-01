@@ -51,6 +51,14 @@ AUDIT_PARAM_ALLOWLIST = {
         }
     ),
     "restore_record": frozenset({"old_version", "new_version", "error_code"}),
+    "create_backup": frozenset(
+        {"backup_format_version", "safety", "error_code"}
+    ),
+    "import_backup": frozenset({"error_code"}),
+    "restore_backup": frozenset({"error_code"}),
+    "resume_worker_after_restore": frozenset({"error_code"}),
+    "restore_recovery": frozenset({"operation_id", "error_code"}),
+    "runtime_state_recovered": frozenset({"error_code"}),
 }
 AUDIT_ENUM_VALUES = {
     "record_type": frozenset({"purchase", "subscription", "bill"}),
@@ -161,6 +169,17 @@ def _audit_value(key: str, value: Any) -> str | int | float | bool | list[str] |
             return str(UUID(value))
         except ValueError:
             return None
+    if key == "operation_id":
+        if not isinstance(value, str):
+            return None
+        try:
+            return str(UUID(value))
+        except ValueError:
+            return None
+    if key == "backup_format_version":
+        return value if value == 1 else None
+    if key == "safety":
+        return value if isinstance(value, bool) else None
     if key == "changed_fields":
         if not isinstance(value, list):
             return None

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
@@ -17,6 +18,8 @@ from lifevault.agent.update_intent import (
     validate_structured_changes,
 )
 from lifevault.config import Settings
+from lifevault.backup.locking import get_vault_lock
+from lifevault.backup.runtime import RuntimeStateStore
 from lifevault.hooks.privacy_hooks import sanitize_input
 from lifevault.mcp_server.client import (
     InProcessPersonalVaultMcpClient,
@@ -82,9 +85,15 @@ class RecordUpdateGraphAgent:
             self.repository,
         )
         self.extractor = UpdateExtractor(settings)
-        settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        self._vault_lock = get_vault_lock(settings.database_path)
+        self._runtime = RuntimeStateStore(settings.database_path)
+        self._generation = self._runtime.generation()
+        self._open_checkpoint()
+
+    def _open_checkpoint(self) -> None:
+        self.settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self._checkpoint_conn = sqlite3.connect(
-            settings.langgraph_checkpoint_path,
+            self.settings.langgraph_checkpoint_path,
             check_same_thread=False,
         )
         self._checkpointer = SqliteSaver(self._checkpoint_conn)
@@ -97,32 +106,45 @@ class RecordUpdateGraphAgent:
         preselected_record_id: str | None = None,
         thread_id: str | None = None,
     ) -> RecordUpdateTurn:
-        active_thread_id = thread_id or f"edit-{uuid4()}"
-        initial: RecordUpdateGraphState = {
-            "thread_id": active_thread_id,
-            "sanitized_input": sanitize_input(text, self.settings.input_max_chars),
-            "warnings": [],
-            "errors": [],
-            "field_errors": {},
-            "stage": "target_extraction",
-        }
-        if preselected_record_id:
-            initial["preselected_record_id"] = preselected_record_id
-        self._graph.invoke(initial, config=self._config(active_thread_id))
-        return self._turn_from_config(active_thread_id)
+        with self._operation():
+            active_thread_id = thread_id or f"edit-{uuid4()}"
+            initial: RecordUpdateGraphState = {
+                "thread_id": active_thread_id,
+                "sanitized_input": sanitize_input(text, self.settings.input_max_chars),
+                "warnings": [],
+                "errors": [],
+                "field_errors": {},
+                "stage": "target_extraction",
+            }
+            if preselected_record_id:
+                initial["preselected_record_id"] = preselected_record_id
+            self._graph.invoke(initial, config=self._config(active_thread_id))
+            return self._turn_from_config(active_thread_id)
 
     def resume(self, thread_id: str, payload: str | dict[str, Any]) -> RecordUpdateTurn:
-        self._graph.invoke(Command(resume=payload), config=self._config(thread_id))
-        return self._turn_from_config(thread_id)
+        with self._operation():
+            self._graph.invoke(Command(resume=payload), config=self._config(thread_id))
+            return self._turn_from_config(thread_id)
 
     def get_state(self, thread_id: str) -> RecordUpdateTurn | None:
-        snapshot = self._graph.get_state(self._config(thread_id))
-        if not snapshot.values and not snapshot.interrupts:
-            return None
-        return self._turn_from_config(thread_id)
+        with self._operation():
+            snapshot = self._graph.get_state(self._config(thread_id))
+            if not snapshot.values and not snapshot.interrupts:
+                return None
+            return self._turn_from_config(thread_id)
 
     def close(self) -> None:
         self._checkpoint_conn.close()
+
+    @contextmanager
+    def _operation(self):
+        with self._vault_lock.acquire("shared", 3.0):
+            generation = self._runtime.generation()
+            if generation != self._generation:
+                self._checkpoint_conn.close()
+                self._generation = generation
+                self._open_checkpoint()
+            yield
 
     def _build_graph(self):
         builder = StateGraph(RecordUpdateGraphState)

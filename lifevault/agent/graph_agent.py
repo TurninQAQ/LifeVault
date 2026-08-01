@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from typing import Any, Literal, TypedDict
 from uuid import uuid4
 
@@ -11,6 +12,8 @@ from langgraph.types import Command, interrupt
 
 from lifevault.agent.corrections import apply_candidate_corrections
 from lifevault.agent.service import LifeVaultAgent
+from lifevault.backup.locking import get_vault_lock
+from lifevault.backup.runtime import RuntimeStateStore
 from lifevault.config import Settings
 from lifevault.hooks.privacy_hooks import sanitize_input
 from lifevault.models.schemas import (
@@ -68,41 +71,60 @@ class GraphAgent:
         self.repository = repository or VaultRepository(settings.database_path)
         self.mcp_client = mcp_client or InProcessPersonalVaultMcpClient(settings, self.repository)
         self.service = LifeVaultAgent(settings, self.repository, mcp_client=self.mcp_client)
-        settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        self._vault_lock = get_vault_lock(settings.database_path)
+        self._runtime = RuntimeStateStore(settings.database_path)
+        self._generation = self._runtime.generation()
+        self._open_checkpoint()
+
+    def _open_checkpoint(self) -> None:
+        self.settings.langgraph_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         self._checkpoint_conn = sqlite3.connect(
-            settings.langgraph_checkpoint_path,
+            self.settings.langgraph_checkpoint_path,
             check_same_thread=False,
         )
         self._checkpointer = SqliteSaver(self._checkpoint_conn)
         self._graph = self._build_graph()
 
     def start_create_record(self, text: str, thread_id: str | None = None) -> GraphTurn:
-        active_thread_id = thread_id or str(uuid4())
-        config = self._config(active_thread_id)
-        self._graph.invoke(
-            {
-                "thread_id": active_thread_id,
-                "user_id": self.settings.default_user_id,
-                "raw_input": text,
-            },
-            config=config,
-        )
-        return self._turn_from_config(active_thread_id)
+        with self._operation():
+            active_thread_id = thread_id or str(uuid4())
+            config = self._config(active_thread_id)
+            self._graph.invoke(
+                {
+                    "thread_id": active_thread_id,
+                    "user_id": self.settings.default_user_id,
+                    "raw_input": text,
+                },
+                config=config,
+            )
+            return self._turn_from_config(active_thread_id)
 
     def resume(self, thread_id: str, payload: str | dict[str, Any]) -> GraphTurn:
-        config = self._config(thread_id)
-        self._graph.invoke(Command(resume=payload), config=config)
-        return self._turn_from_config(thread_id)
+        with self._operation():
+            config = self._config(thread_id)
+            self._graph.invoke(Command(resume=payload), config=config)
+            return self._turn_from_config(thread_id)
 
     def get_state(self, thread_id: str) -> GraphTurn | None:
-        config = self._config(thread_id)
-        snapshot = self._graph.get_state(config)
-        if not snapshot.values and not snapshot.interrupts:
-            return None
-        return self._turn_from_config(thread_id)
+        with self._operation():
+            config = self._config(thread_id)
+            snapshot = self._graph.get_state(config)
+            if not snapshot.values and not snapshot.interrupts:
+                return None
+            return self._turn_from_config(thread_id)
 
     def close(self) -> None:
         self._checkpoint_conn.close()
+
+    @contextmanager
+    def _operation(self):
+        with self._vault_lock.acquire("shared", 3.0):
+            generation = self._runtime.generation()
+            if generation != self._generation:
+                self._checkpoint_conn.close()
+                self._generation = generation
+                self._open_checkpoint()
+            yield
 
     def _build_graph(self):
         builder = StateGraph(LifeVaultGraphState)

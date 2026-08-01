@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ from zoneinfo import ZoneInfo
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.agent.service import LifeVaultAgent
 from lifevault.agent.update_graph_agent import RecordUpdateGraphAgent
+from lifevault.backup.errors import BackupError
+from lifevault.backup.service import BackupService
 from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient
 from lifevault.models.schemas import (
@@ -20,6 +24,7 @@ from lifevault.models.schemas import (
     ReminderStatus,
 )
 from lifevault.storage.repository import VaultRepository
+from lifevault.storage.database import init_db
 from lifevault.tools.idempotency import stable_key
 from lifevault.worker.reminder_worker import ReminderWorker
 
@@ -182,8 +187,33 @@ def main() -> None:
     eval_updates.add_argument("--use-qwen", action="store_true")
     eval_updates.add_argument("--json-out", type=Path, default=None)
 
+    backup = sub.add_parser("backup", help="Manage encrypted full-vault backups")
+    backup_sub = backup.add_subparsers(dest="backup_action", required=True)
+    backup_sub.add_parser("create", help="Create an encrypted backup")
+    backup_sub.add_parser("list", help="List encrypted backups")
+    backup_inspect = backup_sub.add_parser("inspect", help="Inspect and validate a backup")
+    backup_inspect.add_argument("backup_id")
+    backup_import = backup_sub.add_parser("import", help="Import and validate an encrypted backup")
+    backup_import.add_argument("file", type=Path)
+    backup_restore = backup_sub.add_parser("restore", help="Replace the vault from a backup")
+    backup_restore.add_argument("backup_id")
+    backup_sub.add_parser("status", help="Show backup and restore runtime status")
+    backup_sub.add_parser("resume-worker", help="Resume reminders after a restore")
+
     args = parser.parse_args()
     settings = get_settings()
+
+    try:
+        backup_service = BackupService(settings)
+        backup_service.recover_if_needed()
+        if args.command == "backup":
+            if settings.database_path.exists():
+                init_db(settings.database_path)
+            run_backup_command(args, backup_service)
+            return
+    except BackupError as exc:
+        print(f"{exc.code}: {exc.message}")
+        raise SystemExit(2) from exc
 
     if args.command == "mcp-server":
         from lifevault.mcp_server.server import main as run_mcp_server
@@ -610,6 +640,60 @@ def main() -> None:
         else:
             worker_service.run_forever(interval_seconds=args.interval)
         return
+
+
+def run_backup_command(args: argparse.Namespace, service: BackupService) -> None:
+    action = args.backup_action
+    if action == "create":
+        first = getpass.getpass("Backup password: ")
+        second = getpass.getpass("Repeat backup password: ")
+        if unicodedata.normalize("NFC", first) != unicodedata.normalize("NFC", second):
+            raise BackupError("backup_authentication_failed", "The two passwords did not match.")
+        print_json(service.create_backup(first))
+        return
+    if action == "list":
+        for item in service.list_backups():
+            print(
+                f"{item['backup_id']} | {item['size']} bytes | "
+                f"{item['modified_at']} | {item['status']}"
+            )
+        return
+    if action == "inspect":
+        password = getpass.getpass("Backup password: ")
+        print_json(service.inspect_backup(args.backup_id, password))
+        return
+    if action == "import":
+        password = getpass.getpass("Backup password: ")
+        print_json(service.import_backup(args.file, password))
+        return
+    if action == "restore":
+        first = getpass.getpass("Backup password for preview: ")
+        preview = service.inspect_backup(args.backup_id, first)
+        print_json(preview)
+        confirmation = input("Type the complete BACKUP_ID to restore: ").strip()
+        second = getpass.getpass("Re-enter backup password: ")
+        result = service.restore_backup(
+            args.backup_id,
+            second,
+            expected_sha256=preview["file_sha256"],
+            confirmation=confirmation,
+        )
+        print_json(result)
+        return
+    if action == "status":
+        print_json(service.status())
+        return
+    if action == "resume-worker":
+        status = service.status()
+        print(
+            f"worker_paused={status['worker_paused']} | "
+            f"backup_id={status.get('pause_backup_id') or '-'} | "
+            f"overdue={status['overdue_reminder_count']}"
+        )
+        confirmation = input("Type RESUME WORKER to continue reminders: ")
+        print_json(service.resume_worker(confirmation))
+        return
+    raise BackupError("backup_format_unsupported", "Unknown backup command.")
 
 
 def drive_graph_interactively(

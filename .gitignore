@@ -7,3 +7,10 @@ data/*.db
 data/*.db-*
 data/*.sqlite
 data/*.sqlite-*
+data/backups/
+data/.backup-staging/
+data/*.lock
+data/*.runtime.json
+data/*.restore-journal.json
+data/.*.candidate
+data/.*.rollback

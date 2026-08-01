@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.17 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.18 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 
@@ -148,6 +148,16 @@ v0.17 adds recoverable record archive and restore:
 - Worker delivery and subscription rollover exclude archived records. Streamlit adds current/archived record views with preview-confirm actions; CLI adds `archive` and `restore` commands with `--dry-run` and `--yes`.
 - The natural-update evaluation now contains 36 cases. Both fallback and the configured local Qwen pass 36/36 cases and 87/87 expected fields.
 
+v0.18 adds encrypted full-vault backup and crash-safe restore:
+
+- A mandatory-password `.lvbackup` v1 container encrypts a strict ZIP payload containing the business database, LangGraph checkpoint database, and encrypted manifest.
+- scrypt (`N=2^17, r=8, p=1`) derives a 256-bit key; streaming AES-256-GCM authenticates the canonical public header and encrypted payload.
+- SQLite online backup creates consistent snapshots. Restore validates checksums, schema fingerprints, SQLite integrity, format/app/schema versions, configured user scope, paths, and resource limits before replacement.
+- Restore creates a separately usable encrypted safety backup, then coordinates both databases with `flock`, same-filesystem candidates, rollback files, a durable restore journal, WAL checkpointing, and startup recovery.
+- Successful restore changes the vault generation and pauses ReminderWorker. CLI or Streamlit must explicitly resume it after reviewing overdue reminders.
+- CLI adds `backup create/list/inspect/import/restore/status/resume-worker`; Streamlit adds a sixth “备份与恢复” tab. Backup authority is deliberately absent from MCP.
+- Backups are never automatically deleted. JSON/CSV, selective/merge/incremental/cloud/scheduled backups and password recovery remain out of scope.
+
 Create-record interrupts:
 
 - `missing_fields`: resume with natural language supplement.
@@ -218,6 +228,13 @@ python -m lifevault.cli archive RECORD_ID VERSION --dry-run
 python -m lifevault.cli archive RECORD_ID VERSION --yes
 python -m lifevault.cli list --archive-scope archived
 python -m lifevault.cli restore RECORD_ID VERSION --yes
+python -m lifevault.cli backup create
+python -m lifevault.cli backup list
+python -m lifevault.cli backup inspect BACKUP_ID
+python -m lifevault.cli backup import /path/to/file.lvbackup
+python -m lifevault.cli backup restore BACKUP_ID
+python -m lifevault.cli backup status
+python -m lifevault.cli backup resume-worker
 python -m lifevault.cli worker --once
 python -m lifevault.cli eval
 python -m lifevault.cli eval --json-out eval_report.json
@@ -294,7 +311,16 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 python3 -m streamlit run lifevault/app/main.py
 ```
 
-Open the URL printed by Streamlit. The app has five tabs: add record, records, reminders, audit, and settings. The records tab supports current/archived views, typed and natural-language saved-record editing, two-phase status changes, and preview-confirm archive/restore actions.
+Open the URL printed by Streamlit. The app has six tabs: add record, records, reminders, audit, settings, and backup/restore. The backup tab creates, imports, validates, downloads, previews, and restores encrypted full-vault snapshots. Restore controls only appear after password-authenticated inspection and require a second password plus the complete backup ID.
+
+## Backup Security Boundary
+
+- Default backup directory: `data/backups`; set `LIFEVAULT_BACKUP_DIR` before startup to choose another fixed directory.
+- Passwords contain 12–256 Unicode characters, are NFC-normalized, and are never accepted through CLI arguments, environment variables, config, audit, or MCP.
+- The encrypted file limit is 512 MiB and the combined decrypted database limit is 1 GiB. Backup and restore also fail closed on insufficient disk space.
+- Restore is full replacement, never merge. A durable encrypted safety backup must succeed before either active database is replaced.
+- A restored vault preserves absolute reminder timestamps but pauses Worker until explicit resume. Source/target timezone differences are shown in the preview.
+- Losing the password means losing access to that backup. LifeVault has no password persistence, recovery key, bypass, or downgrade switch.
 
 ## Tests
 
@@ -307,6 +333,7 @@ python -m unittest discover -s tests -v
 - `lifevault/models`: Pydantic schemas and Qwen adapter.
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
+- `lifevault/backup`: encrypted container, locks, runtime generation, safety backup, restore journal, and validation.
 - `lifevault/records`: deterministic persisted-record update and reminder-replan planning.
 - `lifevault/agent`: independent LangGraph create-record and natural-update workflows.
 - `lifevault/mcp_server`: FastMCP stdio server, in-process MCP client, and smoke client.

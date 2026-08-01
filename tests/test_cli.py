@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.config import Settings
@@ -15,6 +18,54 @@ from lifevault.storage.repository import VaultRepository
 
 
 class CliCorrectionTest(unittest.TestCase):
+    def test_backup_create_list_inspect_and_status_commands(self) -> None:
+        from lifevault.cli import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database_path = root / "cli-backup.db"
+            backup_dir = root / "backups"
+            VaultRepository(database_path)
+            environment = {
+                "LIFEVAULT_DB": str(database_path),
+                "LIFEVAULT_LANGGRAPH_DB": str(root / "graph.db"),
+                "LIFEVAULT_BACKUP_DIR": str(backup_dir),
+                "LIFEVAULT_USE_QWEN": "0",
+            }
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(sys, "argv", ["lifevault", "backup", "create"]),
+                patch("getpass.getpass", side_effect=["这是一个足够长的命令行密码123"] * 2),
+                redirect_stdout(output),
+            ):
+                main()
+            backup_id = next(backup_dir.glob("*.lvbackup")).stem
+            self.assertIn(backup_id, output.getvalue())
+
+            for command in (
+                ["lifevault", "backup", "list"],
+                ["lifevault", "backup", "status"],
+            ):
+                output = io.StringIO()
+                with (
+                    patch.dict(os.environ, environment),
+                    patch.object(sys, "argv", command),
+                    redirect_stdout(output),
+                ):
+                    main()
+                self.assertIn(backup_id if command[-1] == "list" else '"backup_format_version": 1', output.getvalue())
+
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(sys, "argv", ["lifevault", "backup", "inspect", backup_id]),
+                patch("getpass.getpass", return_value="这是一个足够长的命令行密码123"),
+                redirect_stdout(output),
+            ):
+                main()
+            self.assertIn('"integrity": "ok"', output.getvalue())
+
     def test_archive_and_restore_commands_preview_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             database_path = Path(tmp) / "cli-lifecycle.db"

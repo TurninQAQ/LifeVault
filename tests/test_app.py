@@ -278,7 +278,7 @@ class StreamlitAppTest(unittest.TestCase):
                 self.assertEqual(list(app.exception), [])
                 self.assertEqual(
                     [tab.label for tab in app.tabs],
-                    ["添加记录", "我的记录", "提醒中心", "审计", "设置"],
+                    ["添加记录", "我的记录", "提醒中心", "审计", "设置", "备份与恢复"],
                 )
 
                 app.text_area[0].input(

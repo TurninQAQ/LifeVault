@@ -5,6 +5,10 @@ from datetime import date, datetime, time as dt_time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from lifevault.backup.errors import LockTimeoutError
+from lifevault.backup.locking import get_vault_lock
+from lifevault.backup.runtime import RuntimeStateStore
+from lifevault.backup.service import BackupService
 from lifevault.config import Settings
 from lifevault.models.schemas import RecordStatus, RecordType, ReminderCreate, ReminderType
 from lifevault.storage.repository import VaultRepository
@@ -30,8 +34,30 @@ class ReminderWorker:
         self.repository = repository or VaultRepository(settings.database_path)
         self.desktop_provider = desktop_provider or DesktopNotificationProvider()
         self.console_provider = console_provider or ConsoleNotificationProvider()
+        self._vault_lock = get_vault_lock(settings.database_path)
+        self._runtime = RuntimeStateStore(settings.database_path)
+        self._backup_service = BackupService(settings)
 
     def run_once(self, now: datetime | None = None) -> int:
+        try:
+            self._backup_service.recover_if_needed()
+            with self._vault_lock.acquire("shared", 3.0):
+                state, recovered = self._runtime.load()
+                if recovered:
+                    self.repository.record_audit_event(
+                        self.settings.default_user_id,
+                        "worker",
+                        "runtime_state_recovered",
+                        None,
+                        "ok",
+                    )
+                if state.worker_paused_after_restore:
+                    return 0
+                return self._run_once_locked(now)
+        except LockTimeoutError:
+            return 0
+
+    def _run_once_locked(self, now: datetime | None = None) -> int:
         current = _normalize_now(now, self.settings.default_timezone)
         reminders = self.repository.claim_due_reminders(
             self.settings.default_user_id,

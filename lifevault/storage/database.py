@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
+
+from lifevault.backup.locking import get_vault_lock
+
+
+VAULT_SCHEMA_VERSION = 1
 
 
 SCHEMA = """
@@ -174,12 +181,21 @@ PRAGMA foreign_keys = ON;
 """
 
 
-def connect(database_path: Path) -> sqlite3.Connection:
+@contextmanager
+def connect(database_path: Path) -> Iterator[sqlite3.Connection]:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(database_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    with get_vault_lock(database_path).acquire("shared", 3.0):
+        conn = sqlite3.connect(database_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def init_db(database_path: Path) -> None:
@@ -201,3 +217,4 @@ def init_db(database_path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_life_records_archive "
             "ON life_records(user_id, archived_at)"
         )
+        conn.execute(f"PRAGMA user_version = {VAULT_SCHEMA_VERSION}")

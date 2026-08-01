@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time as monotonic_time
+import unicodedata
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -10,6 +12,8 @@ import streamlit as st
 
 from lifevault.agent.graph_agent import GraphAgent
 from lifevault.agent.update_graph_agent import RecordUpdateGraphAgent
+from lifevault.backup.errors import BackupError
+from lifevault.backup.service import BackupService
 from lifevault.config import get_settings
 from lifevault.mcp_server.client import InProcessPersonalVaultMcpClient, PersonalVaultMcpClient
 from lifevault.models.schemas import (
@@ -43,12 +47,23 @@ def get_services() -> tuple[GraphAgent, RecordUpdateGraphAgent, PersonalVaultMcp
 
 
 def main() -> None:
-    agent, update_agent, mcp_client = get_services()
     settings = get_settings()
+    backup_service = BackupService(settings)
+    try:
+        recovery = backup_service.recover_if_needed()
+    except BackupError as exc:
+        st.error(f"{exc.code}: {exc.message}")
+        return
+    agent, update_agent, mcp_client = get_services()
 
     st.title("LifeVault")
-    tab_add, tab_records, tab_reminders, tab_audit, tab_settings = st.tabs(
-        ["添加记录", "我的记录", "提醒中心", "审计", "设置"]
+    status = backup_service.status()
+    if recovery:
+        st.warning("检测到未完成的恢复事务，已回滚原数据库；提醒 Worker 保持暂停。")
+    elif status["worker_paused"]:
+        st.warning("知识库恢复后提醒 Worker 已暂停，请在“备份与恢复”中确认后重新启用。")
+    tab_add, tab_records, tab_reminders, tab_audit, tab_settings, tab_backup = st.tabs(
+        ["添加记录", "我的记录", "提醒中心", "审计", "设置", "备份与恢复"]
     )
 
     with tab_add:
@@ -65,6 +80,9 @@ def main() -> None:
 
     with tab_settings:
         render_settings(mcp_client)
+
+    with tab_backup:
+        render_backups(backup_service)
 
 
 def render_add_record(agent: GraphAgent) -> None:
@@ -1578,6 +1596,12 @@ def render_audit(mcp_client: PersonalVaultMcpClient) -> None:
             "cancel_reminder",
             "send_reminder",
             "update_preferences",
+            "create_backup",
+            "import_backup",
+            "restore_backup",
+            "resume_worker_after_restore",
+            "restore_recovery",
+            "runtime_state_recovered",
         ],
         key="audit_action",
     )
@@ -1670,6 +1694,251 @@ def render_settings(mcp_client: PersonalVaultMcpClient) -> None:
     else:
         st.info("设置没有变化")
     st.json(update_result["preference"])
+
+
+def render_backups(service: BackupService) -> None:
+    if st.session_state.pop("backup_clear_passwords", False):
+        for key in list(st.session_state):
+            if str(key).startswith("backup_") and "password" in str(key):
+                st.session_state.pop(key, None)
+    notice = st.session_state.pop("backup_notice", None)
+    if isinstance(notice, str):
+        st.success(notice)
+    error_notice = st.session_state.pop("backup_error_notice", None)
+    if isinstance(error_notice, str):
+        st.error(error_notice)
+    status = service.status()
+    status_columns = st.columns(4)
+    status_columns[0].metric("备份格式", f"v{status['backup_format_version']}")
+    status_columns[1].metric("数据库结构", f"v{status['vault_schema_version']}")
+    status_columns[2].metric("Worker", "已暂停" if status["worker_paused"] else "运行中")
+    status_columns[3].metric("可用空间", _format_bytes(status["available_space"]))
+
+    if status["worker_paused"]:
+        st.warning(
+            f"恢复来源：{status.get('pause_backup_id') or '-'}；"
+            f"当前逾期提醒：{status['overdue_reminder_count']}"
+        )
+        resume_confirmed = st.checkbox(
+            "我确认重新发送后续提醒",
+            key="backup_resume_confirmed",
+        )
+        if st.button(
+            "启用提醒 Worker",
+            type="primary",
+            disabled=not resume_confirmed,
+        ):
+            try:
+                service.resume_worker("RESUME WORKER")
+            except BackupError as exc:
+                _render_backup_error(exc)
+            else:
+                st.session_state["backup_notice"] = "提醒 Worker 已重新启用。"
+                st.rerun()
+
+    st.divider()
+    st.subheader("创建备份")
+    create_columns = st.columns(2)
+    create_password = create_columns[0].text_input(
+        "备份密码",
+        type="password",
+        key="backup_create_password",
+        max_chars=256,
+    )
+    create_repeat = create_columns[1].text_input(
+        "再次输入备份密码",
+        type="password",
+        key="backup_create_repeat",
+        max_chars=256,
+    )
+    if st.button("创建加密备份", type="primary"):
+        if unicodedata.normalize("NFC", create_password) != unicodedata.normalize(
+            "NFC", create_repeat
+        ):
+            _finish_backup_action(error="两次输入的密码不一致。")
+        else:
+            try:
+                result = service.create_backup(create_password)
+            except BackupError as exc:
+                _finish_backup_action(error=f"{exc.code}: {exc.message}")
+            else:
+                _finish_backup_action(notice=f"备份已创建：{result['backup_id']}")
+
+    st.divider()
+    st.subheader("导入备份")
+    uploaded = st.file_uploader(
+        "选择 .lvbackup 文件",
+        type=["lvbackup"],
+        max_upload_size=512,
+        key="backup_upload",
+    )
+    import_password = st.text_input(
+        "导入密码",
+        type="password",
+        key="backup_import_password",
+        max_chars=256,
+    )
+    if st.button("验证并导入", disabled=uploaded is None):
+        try:
+            result = service.import_stream(uploaded, import_password)
+        except BackupError as exc:
+            _finish_backup_action(error=f"{exc.code}: {exc.message}")
+        else:
+            _finish_backup_action(
+                notice=f"备份导入结果：{result['result']} · {result['backup_id']}"
+            )
+
+    st.divider()
+    st.subheader("已有备份")
+    backups = service.list_backups()
+    if not backups:
+        st.info("暂无备份")
+        return
+    backup_ids = [item["backup_id"] for item in backups]
+    selected_id = st.selectbox("备份 ID", backup_ids, key="backup_selected_id")
+    selected = next(item for item in backups if item["backup_id"] == selected_id)
+    selected_path = service.backup_file(selected_id)
+    metadata = st.columns(3)
+    metadata[0].write(_format_bytes(selected["size"]))
+    metadata[1].write(selected["modified_at"])
+    metadata[2].write(selected["status"])
+    st.download_button(
+        "下载密文备份",
+        data=lambda path=selected_path: path.read_bytes(),
+        file_name=selected_path.name,
+        mime="application/octet-stream",
+        key=f"backup_download_{selected_id}",
+    )
+
+    inspect_password = st.text_input(
+        "检查密码",
+        type="password",
+        key=f"backup_inspect_password_{selected_id}",
+        max_chars=256,
+    )
+    if st.button("检查备份", key=f"backup_inspect_{selected_id}"):
+        try:
+            preview = service.inspect_backup(selected_id, inspect_password)
+        except BackupError as exc:
+            st.session_state.pop("backup_restore_preview", None)
+            _finish_backup_action(error=f"{exc.code}: {exc.message}")
+        else:
+            st.session_state["backup_restore_preview"] = {
+                "preview": preview,
+                "created_monotonic": monotonic_time.monotonic(),
+            }
+            _finish_backup_action()
+
+    preview_state = st.session_state.get("backup_restore_preview")
+    if not isinstance(preview_state, dict):
+        return
+    preview = preview_state.get("preview") or {}
+    expired = monotonic_time.monotonic() - float(
+        preview_state.get("created_monotonic", 0)
+    ) > 900
+    if preview.get("backup_id") != selected_id or expired:
+        st.session_state.pop("backup_restore_preview", None)
+        if expired:
+            st.warning("恢复预览已过期，请重新检查备份。")
+        return
+
+    st.subheader("恢复预览")
+    preview_rows = {
+        "备份 ID": preview["backup_id"],
+        "类型": preview["backup_kind"],
+        "创建时间": preview["created_at"],
+        "应用版本": preview["app_version"],
+        "结构版本": preview["vault_schema_version"],
+        "来源用户": preview["user_id"],
+        "来源时区": preview["source_timezone"],
+        "记录": preview["record_count"],
+        "归档记录": preview["archived_record_count"],
+        "提醒": preview["reminder_count"],
+        "逾期提醒": preview["overdue_reminder_count"],
+        "完整性": preview["integrity"],
+    }
+    st.dataframe(
+        [{"项目": key, "值": value} for key, value in preview_rows.items()],
+        hide_index=True,
+        width="stretch",
+    )
+    if preview["timezone_warning"]:
+        st.warning(
+            f"来源时区 {preview['source_timezone']} 与当前时区 "
+            f"{preview['target_timezone']} 不同。"
+        )
+    restore_confirmed = st.checkbox(
+        "我确认用此备份替换当前知识库",
+        key=f"backup_restore_checkbox_{selected_id}",
+    )
+    typed_id = st.text_input(
+        "完整输入备份 ID",
+        key=f"backup_restore_id_{selected_id}",
+    )
+    restore_password = st.text_input(
+        "再次输入备份密码",
+        type="password",
+        key=f"backup_restore_password_{selected_id}",
+        max_chars=256,
+    )
+    if st.button(
+        "恢复整个知识库",
+        type="primary",
+        disabled=not restore_confirmed or typed_id != selected_id,
+        key=f"backup_restore_{selected_id}",
+    ):
+        try:
+            result = service.restore_backup(
+                selected_id,
+                restore_password,
+                expected_sha256=preview["file_sha256"],
+                confirmation=typed_id,
+            )
+        except BackupError as exc:
+            st.session_state.pop("backup_restore_preview", None)
+            _finish_backup_action(error=f"{exc.code}: {exc.message}")
+        else:
+            _close_cached_services()
+            st.session_state.clear()
+            st.session_state["backup_notice"] = (
+                f"知识库已恢复；安全备份：{result['safety_backup_id']}。"
+            )
+            st.rerun()
+
+
+def _close_cached_services() -> None:
+    try:
+        graph_agent, update_agent, _mcp_client = get_services()
+        graph_agent.close()
+        update_agent.close()
+    finally:
+        get_services.clear()
+
+
+def _render_backup_error(exc: BackupError) -> None:
+    st.error(f"{exc.code}: {exc.message}")
+
+
+def _finish_backup_action(
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+) -> None:
+    st.session_state["backup_clear_passwords"] = True
+    if notice:
+        st.session_state["backup_notice"] = notice
+    if error:
+        st.session_state["backup_error_notice"] = error
+    st.rerun()
+
+
+def _format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GiB"
 
 
 def render_mcp_error(tool_name: str, result: dict) -> bool:
