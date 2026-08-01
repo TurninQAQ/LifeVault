@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v0.18 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v0.19 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 
@@ -24,7 +24,19 @@ archive/restore intent -> active/archived MCP search -> explicit selection
 -> lifecycle preview -> user confirmation -> atomic archive or restore
 ```
 
-The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted create-record workflows in `data/langgraph_checkpoints.sqlite`.
+The model does not write the database or send notifications. It only produces a candidate record and a tool plan. The Agent validates fields, calculates dates, checks duplicates through MCP, and requires confirmation before saving. LangGraph persists interrupted workflows in the configured checkpoint database; a source checkout defaults to `data/langgraph_checkpoints.sqlite`.
+
+```mermaid
+flowchart LR
+    UI[Streamlit / CLI] --> GRAPH[LangGraph Agent]
+    GRAPH --> MODEL[Local Qwen]
+    GRAPH --> TOOLS[Deterministic Tools]
+    GRAPH --> MCP[Personal Vault MCP]
+    MCP --> DB[(Business SQLite)]
+    GRAPH --> CHECKPOINT[(LangGraph SQLite)]
+    WORKER[Reminder Worker] --> DB
+    WORKER --> DESKTOP[Desktop Notification]
+```
 
 v0.5 adds a focused subscription renewal loop:
 
@@ -51,7 +63,7 @@ v0.7 hardens reminder delivery:
 
 v0.8 adds an extraction evaluation baseline:
 
-- `sample_data/examples.jsonl` contains 60 hand-written extraction cases for purchases, subscriptions, bills, searches, and missing-field inputs.
+- The extraction set, now packaged at `lifevault/eval/data/examples.jsonl`, began with 60 hand-written purchase, subscription, bill, search, and missing-field cases.
 - `python -m lifevault.cli eval` runs a dry-run extractor evaluation without saving records or creating reminders.
 - Evaluation defaults to the deterministic fallback extractor for reproducible local results; `--use-qwen` can run the configured local Qwen manually.
 - Optional `--json-out` writes per-case expected/actual/mismatch details.
@@ -135,7 +147,7 @@ v0.16 adds controlled natural-language updates for persisted records:
 - Content changes and status changes are separate operations. Requests to make payments, issue refunds, stop charges, or cancel an external subscription are refused rather than treated as local status changes.
 - Status updates now have `preview_record_status_update`, type-specific status allowlists, explicit confirmation, optimistic locking, idempotency, and atomic cancellation of invalid pending/snoozed reminders.
 - Streamlit supports natural edits globally and from an individual record. CLI adds `edit`, `edit-resume`, and `edit-state`; the existing `status` command now previews before writing.
-- `sample_data/update_examples.jsonl` and `eval-updates` evaluate the target and patch stages. Both fallback and the configured local Qwen pass 24/24 included cases and 54/54 expected fields.
+- The update set, now packaged at `lifevault/eval/data/update_examples.jsonl`, and `eval-updates` evaluate the target and patch stages. Both fallback and the configured local Qwen pass 24/24 included cases and 54/54 expected fields.
 
 v0.17 adds recoverable record archive and restore:
 
@@ -157,6 +169,16 @@ v0.18 adds encrypted full-vault backup and crash-safe restore:
 - Successful restore changes the vault generation and pauses ReminderWorker. CLI or Streamlit must explicitly resume it after reviewing overdue reminders.
 - CLI adds `backup create/list/inspect/import/restore/status/resume-worker`; Streamlit adds a sixth “备份与恢复” tab. Backup authority is deliberately absent from MCP.
 - Backups are never automatically deleted. JSON/CSV, selective/merge/incremental/cloud/scheduled backups and password recovery remain out of scope.
+
+v0.19 makes the source tree an installable and relocatable local application:
+
+- Standard package metadata produces a real `lifevault-0.19.0` wheel with the complete Python package instead of an empty `UNKNOWN-0.0.0` artifact.
+- Console commands `lifevault` and `lifevault-mcp` are installed with the package.
+- `lifevault serve` supervises Streamlit and ReminderWorker together, finds the next free loopback port, and shuts down both children cleanly on Ctrl-C.
+- Remote binding is rejected because the current app has no network authentication boundary.
+- Installed builds keep mutable state in a user-owned platform data directory. `LIFEVAULT_HOME` relocates the business database, checkpoint database, backups, locks, and runtime files together.
+- Purchase, subscription, and bill Skills plus both JSONL evaluation sets are packaged into the wheel. Qwen now loads only the selected record-type Skill for create-record extraction; search extraction loads none.
+- Explicit values found by deterministic parsing constrain Qwen output without discarding model-only fields. This canonicalizes titles/date text and prevents invented reminder intent; the configured local Qwen passes all 72 extraction cases and 448 expected fields.
 
 Create-record interrupts:
 
@@ -189,15 +211,25 @@ If Qwen is unavailable or returns invalid JSON, the app falls back to a small ru
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements.txt
-python -m lifevault.cli init-db
+pip install -e .
+lifevault init-db
+lifevault serve
+```
+
+`lifevault serve` prints the local URL, starts the Reminder Worker, and keeps both processes under one supervisor. Use `--no-worker` for UI-only debugging or `--port 0` to request any free loopback port.
+
+Source checkouts preserve the existing `./data` default. Installed wheels use a user-owned platform data directory, such as `~/.local/share/lifevault` on Linux. Set one root before startup to make the location explicit:
+
+```bash
+export LIFEVAULT_HOME="$HOME/.lifevault"
+lifevault serve
 ```
 
 On this machine, `python3-venv` is not installed and `HTTP_PROXY/HTTPS_PROXY` can point at an unavailable local proxy. The verified fallback is:
 
 ```bash
-env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy python3 -m pip install --user -r requirements.txt
-python3 -m lifevault.cli init-db
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy python3 -m pip install --user -e .
+lifevault init-db
 ```
 
 ## CLI Demo
@@ -308,10 +340,16 @@ All tools use the configured local user from `LIFEVAULT_USER_ID`; `user_id` is n
 ## Streamlit
 
 ```bash
-python3 -m streamlit run lifevault/app/main.py
+lifevault serve
 ```
 
 Open the URL printed by Streamlit. The app has six tabs: add record, records, reminders, audit, settings, and backup/restore. The backup tab creates, imports, validates, downloads, previews, and restores encrypted full-vault snapshots. Restore controls only appear after password-authenticated inspection and require a second password plus the complete backup ID.
+
+For UI-only development without the supervised Worker:
+
+```bash
+python3 -m streamlit run lifevault/app/main.py
+```
 
 ## Backup Security Boundary
 
@@ -326,11 +364,17 @@ Open the URL printed by Streamlit. The app has six tabs: add record, records, re
 
 ```bash
 python -m unittest discover -s tests -v
+python -m pip wheel . --no-deps --wheel-dir dist
+python -m lifevault.cli eval
+python -m lifevault.cli eval-updates
+python -m lifevault.cli mcp-smoke
 ```
 
 ## Project Shape
 
 - `lifevault/models`: Pydantic schemas and Qwen adapter.
+- `lifevault/skills`: packaged task instructions loaded selectively for Qwen extraction.
+- `lifevault/eval/data`: packaged extraction and natural-update evaluation sets.
 - `lifevault/tools`: deterministic tools for dates, idempotency, and notifications.
 - `lifevault/storage`: SQLite schema and repository.
 - `lifevault/backup`: encrypted container, locks, runtime generation, safety backup, restore journal, and validation.
@@ -338,5 +382,5 @@ python -m unittest discover -s tests -v
 - `lifevault/agent`: independent LangGraph create-record and natural-update workflows.
 - `lifevault/mcp_server`: FastMCP stdio server, in-process MCP client, and smoke client.
 - `lifevault/app`: Streamlit UI.
+- `lifevault/runtime`: local Streamlit/Worker process supervisor.
 - `lifevault/worker`: reminder scanner and notification sender.
-- `skills`: task-specific extraction instructions for purchase, subscription, and bill records.

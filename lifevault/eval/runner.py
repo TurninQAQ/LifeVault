@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from lifevault.config import Settings, PROJECT_ROOT
+from lifevault.config import Settings
 from lifevault.models.llm_factory import Extractor
 from lifevault.models.schemas import ExtractedRecordCandidate
 
 
-DEFAULT_EXAMPLES_PATH = PROJECT_ROOT / "sample_data" / "examples.jsonl"
+DEFAULT_EXAMPLES_PATH = Path(__file__).resolve().parent / "data" / "examples.jsonl"
 
 
 @dataclass(frozen=True)

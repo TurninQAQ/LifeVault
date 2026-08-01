@@ -33,7 +33,7 @@ from lifevault.backup.locking import (
     restore_journal_path,
 )
 from lifevault.backup.runtime import RuntimeStateStore, _fsync_directory
-from lifevault.config import PROJECT_ROOT, Settings
+from lifevault.config import Settings
 from lifevault.storage.database import VAULT_SCHEMA_VERSION
 from lifevault.storage.repository import VaultRepository
 
@@ -193,7 +193,7 @@ class BackupService:
         self.database_path = settings.database_path.absolute()
         self.checkpoint_path = settings.langgraph_checkpoint_path.absolute()
         self.backup_dir = settings.backup_dir.absolute()
-        self.staging_root = (PROJECT_ROOT / "data" / ".backup-staging").absolute()
+        self.staging_root = (self.database_path.parent / ".backup-staging").absolute()
         self.runtime = RuntimeStateStore(self.database_path)
         self.vault_lock = get_vault_lock(self.database_path)
         self.crypto_lock = get_crypto_lock(self.database_path)

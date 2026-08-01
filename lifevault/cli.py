@@ -35,6 +35,15 @@ def main() -> None:
 
     sub.add_parser("init-db", help="Initialize the SQLite database")
 
+    serve_cmd = sub.add_parser(
+        "serve",
+        help="Run the Streamlit UI and Reminder Worker under one local supervisor",
+    )
+    serve_cmd.add_argument("--host", default="127.0.0.1", help="Loopback bind address")
+    serve_cmd.add_argument("--port", type=int, default=8501, help="Preferred UI port; 0 chooses any free port")
+    serve_cmd.add_argument("--worker-interval", type=int, default=60, help="Reminder scan interval in seconds")
+    serve_cmd.add_argument("--no-worker", action="store_true", help="Run only the UI")
+
     add = sub.add_parser("add", help="Create a record draft from natural language")
     add.add_argument("text", help="Natural language input")
     add.add_argument("--yes", action="store_true", help="Confirm record and reminder creation")
@@ -228,6 +237,24 @@ def main() -> None:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
+    if args.command == "serve":
+        from lifevault.runtime.supervisor import serve
+
+        try:
+            return_code = serve(
+                settings,
+                host=args.host,
+                port=args.port,
+                worker_interval=args.worker_interval,
+                no_worker=args.no_worker,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"Cannot start LifeVault: {exc}")
+            raise SystemExit(2) from exc
+        if return_code:
+            raise SystemExit(return_code)
+        return
+
     if args.command == "eval":
         from lifevault.eval.runner import DEFAULT_EXAMPLES_PATH, format_summary, run_eval, write_json_report
 
@@ -259,6 +286,19 @@ def main() -> None:
         if args.json_out:
             write_update_json_report(report, args.json_out)
             print(f"Wrote JSON report: {args.json_out}")
+        return
+
+    if args.command == "worker":
+        repository = VaultRepository(settings.database_path)
+        worker_service = ReminderWorker(settings, repository)
+        if args.once:
+            count = worker_service.run_once(datetime.now().astimezone())
+            print(f"Processed reminders: {count}")
+        else:
+            try:
+                worker_service.run_forever(interval_seconds=args.interval)
+            except KeyboardInterrupt:
+                print("Reminder Worker stopped.")
         return
 
     repository = VaultRepository(settings.database_path)
@@ -631,16 +671,6 @@ def main() -> None:
             f"cancelled_reminders={len(outcome.get('cancelled_reminders') or [])}"
         )
         return
-
-    if args.command == "worker":
-        worker_service = ReminderWorker(settings, repository)
-        if args.once:
-            count = worker_service.run_once(datetime.now().astimezone())
-            print(f"Processed reminders: {count}")
-        else:
-            worker_service.run_forever(interval_seconds=args.interval)
-        return
-
 
 def run_backup_command(args: argparse.Namespace, service: BackupService) -> None:
     action = args.backup_action

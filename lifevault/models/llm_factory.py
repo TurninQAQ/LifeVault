@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from lifevault.config import Settings
 from lifevault.models.schemas import ExtractedRecordCandidate, RecordType
+from lifevault.skills import load_skill
 from lifevault.tools.date_tools import parse_int
 
 
@@ -61,7 +62,9 @@ class QwenClient:
         self.session.trust_env = False
 
     def extract_record(self, text: str, now: datetime) -> ExtractedRecordCandidate:
-        prompt = build_extraction_prompt(text, now)
+        selected_skill = select_extraction_skill(text)
+        skill_content = load_skill(selected_skill) if selected_skill else None
+        prompt = build_extraction_prompt(text, now, skill_content=skill_content)
         response = self.session.post(
             f"{self.settings.qwen_base_url.rstrip('/')}/chat/completions",
             json={
@@ -183,15 +186,123 @@ class Extractor:
         warnings: list[str] = []
         if self.settings.use_qwen:
             try:
-                return self.qwen.extract_record(text, now), warnings
+                model_candidate = self.qwen.extract_record(text, now)
+                deterministic_candidate = self.fallback.extract_record(text, now)
+                return reconcile_extracted_candidate(
+                    model_candidate,
+                    deterministic_candidate,
+                ), warnings
             except Exception as exc:
                 warnings.append(f"Qwen unavailable or invalid output, used fallback extractor: {exc}")
         return self.fallback.extract_record(text, now), warnings
 
 
-def build_extraction_prompt(text: str, now: datetime) -> str:
+COMMON_DETERMINISTIC_FIELDS = frozenset(
+    {
+        "amount",
+        "event_date_text",
+        "deadline_text",
+        "reminder_requested",
+        "return_reminder_requested",
+        "warranty_reminder_requested",
+        "remind_before_days",
+        "return_remind_before_days",
+        "warranty_remind_before_days",
+        "reminder_time",
+    }
+)
+
+TYPE_DETERMINISTIC_FIELDS = {
+    RecordType.PURCHASE: frozenset(
+        {
+            "title",
+            "merchant",
+            "order_number",
+            "return_days",
+            "warranty_months",
+            "return_deadline_text",
+            "warranty_deadline_text",
+        }
+    ),
+    RecordType.SUBSCRIPTION: frozenset(
+        {
+            "title",
+            "service_name",
+            "billing_cycle",
+            "next_renewal_text",
+            "auto_renew",
+        }
+    ),
+    RecordType.BILL: frozenset(
+        {
+            "title",
+            "bill_name",
+            "billing_period",
+            "due_date_text",
+        }
+    ),
+}
+
+
+def reconcile_extracted_candidate(
+    model_candidate: ExtractedRecordCandidate,
+    deterministic_candidate: ExtractedRecordCandidate,
+) -> ExtractedRecordCandidate:
+    """Constrain model output with values directly evidenced by deterministic parsing."""
+    merged = model_candidate.model_dump(mode="python")
+    deterministic = deterministic_candidate.model_dump(mode="python")
+
+    if model_candidate.intent == "unknown":
+        merged["intent"] = deterministic_candidate.intent
+    if model_candidate.record_type is None:
+        merged["record_type"] = deterministic_candidate.record_type
+
+    effective_intent = merged["intent"]
+    effective_record_type = merged["record_type"]
+
+    if deterministic_candidate.intent == effective_intent == "search_records":
+        if deterministic_candidate.record_type is not None:
+            merged["record_type"] = deterministic_candidate.record_type
+        if deterministic_candidate.search_query is not None:
+            merged["title"] = deterministic_candidate.title
+            merged["search_query"] = deterministic_candidate.search_query
+        return ExtractedRecordCandidate.model_validate(merged)
+
+    for field in COMMON_DETERMINISTIC_FIELDS:
+        value = deterministic[field]
+        if value is not None:
+            merged[field] = value
+
+    if effective_record_type == deterministic_candidate.record_type:
+        for field in TYPE_DETERMINISTIC_FIELDS.get(
+            deterministic_candidate.record_type,
+            frozenset(),
+        ):
+            value = deterministic[field]
+            if value is not None:
+                merged[field] = value
+
+    return ExtractedRecordCandidate.model_validate(merged)
+
+
+def build_extraction_prompt(
+    text: str,
+    now: datetime,
+    *,
+    skill_content: str | None = None,
+) -> str:
+    skill_section = ""
+    if skill_content:
+        skill_section = f"""
+
+本次只加载以下可信任务 Skill，并将其作为字段提取约束：
+<lifevault-skill>
+{skill_content}
+</lifevault-skill>
+"""
     return f"""
 当前时间：{now.isoformat()}
+{skill_section}
 
 请把用户输入转成下面 JSON Schema 兼容的对象：
 {{
@@ -246,6 +357,12 @@ def build_extraction_prompt(text: str, now: datetime) -> str:
 用户输入：
 {text}
 """.strip()
+
+
+def select_extraction_skill(text: str) -> str | None:
+    if _guess_intent(text) == "search_records":
+        return None
+    return _guess_record_type(text).value
 
 
 def extract_json_object(content: str) -> dict[str, Any]:

@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from lifevault.models.llm_factory import FallbackExtractor
-from lifevault.models.schemas import RecordType
+from lifevault.models.llm_factory import FallbackExtractor, reconcile_extracted_candidate
+from lifevault.models.schemas import ExtractedRecordCandidate, RecordType
 
 
 class FallbackExtractorTest(unittest.TestCase):
@@ -79,6 +79,62 @@ class FallbackExtractorTest(unittest.TestCase):
         self.assertEqual(pdd.record_type, RecordType.PURCHASE)
         self.assertEqual(pdd.merchant, "拼多多")
         self.assertEqual(pdd.title, "显示器")
+
+    def test_deterministic_evidence_canonicalizes_qwen_fields(self) -> None:
+        text = "Netflix 会员每月 68 元，下个月 15 号自动续费，提前 3 天提醒我。"
+        model_candidate = ExtractedRecordCandidate(
+            intent="create_record",
+            record_type="subscription",
+            title="Netflix 会员",
+            service_name="Netflix 会员",
+            amount=68,
+            billing_cycle="monthly",
+            next_renewal_text="下个月 15 号",
+            auto_renew=True,
+            notes="家庭账户",
+        )
+
+        merged = reconcile_extracted_candidate(
+            model_candidate,
+            self.extractor.extract_record(text, self.now),
+        )
+
+        self.assertEqual(merged.title, "Netflix")
+        self.assertEqual(merged.service_name, "Netflix")
+        self.assertEqual(merged.next_renewal_text, "下个月15号")
+        self.assertEqual(merged.remind_before_days, 3)
+        self.assertEqual(merged.notes, "家庭账户")
+
+    def test_type_specific_rules_do_not_override_a_different_model_type(self) -> None:
+        model_candidate = ExtractedRecordCandidate(
+            intent="create_record",
+            record_type="subscription",
+            title="专业服务",
+            service_name="专业服务",
+        )
+        deterministic_candidate = self.extractor.extract_record(
+            "我买了一个专业服务，100 元。",
+            self.now,
+        )
+
+        merged = reconcile_extracted_candidate(model_candidate, deterministic_candidate)
+
+        self.assertEqual(merged.record_type, RecordType.SUBSCRIPTION)
+        self.assertEqual(merged.title, "专业服务")
+        self.assertEqual(merged.amount, 100)
+
+    def test_search_rules_fill_an_unknown_model_intent(self) -> None:
+        model_candidate = ExtractedRecordCandidate(intent="unknown")
+        deterministic_candidate = self.extractor.extract_record(
+            "查询 Netflix 会员",
+            self.now,
+        )
+
+        merged = reconcile_extracted_candidate(model_candidate, deterministic_candidate)
+
+        self.assertEqual(merged.intent, "search_records")
+        self.assertEqual(merged.record_type, RecordType.SUBSCRIPTION)
+        self.assertEqual(merged.search_query, "Netflix")
 
 
 if __name__ == "__main__":

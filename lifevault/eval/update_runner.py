@@ -8,12 +8,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from lifevault.agent.update_intent import build_record_update_changes
-from lifevault.config import PROJECT_ROOT, Settings
+from lifevault.config import Settings
 from lifevault.models.schemas import RecordType
 from lifevault.models.update_extractor import UpdateExtractor
 
 
-DEFAULT_UPDATE_EXAMPLES_PATH = PROJECT_ROOT / "sample_data" / "update_examples.jsonl"
+DEFAULT_UPDATE_EXAMPLES_PATH = Path(__file__).resolve().parent / "data" / "update_examples.jsonl"
 DEFAULT_UPDATE_EVAL_NOW = datetime(
     2026,
     7,
