@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.17 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v0.18 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.17 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v0.18 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -21,6 +21,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - 已保存记录可以通过 MCP 预览并原子更新，同时重排受影响提醒。
 - 已保存记录可以通过独立 LangGraph 自然语言修改，但必须由用户选择目标并确认补丁。
 - 已保存记录可以归档和恢复；归档会取消活动提醒，但不会混用业务状态或物理删除数据。
+- 整个本地知识库可以导出为强制密码加密的双数据库快照，并通过安全备份和崩溃日志完成全量恢复。
 
 核心设计原则：
 
@@ -916,9 +917,175 @@ sanitized input
 
 ---
 
-## 21. 当前测试体系
+## 21. v0.18：加密整库备份与崩溃安全恢复
 
-当前共有 132 个测试，主要分层如下：
+**目标**
+
+给本地单用户知识库增加可移机、可验证、可回滚的完整快照。v0.18 只备份业务 SQLite 和 LangGraph checkpoint SQLite，不把配置、代码、日志、已有备份或密码打包进去。
+
+这不是普通“导出 JSON”：JSON 会丢失 SQLite 结构、事务状态、审计、幂等结果和 Graph 中断点。整库快照保留这些权威状态，也因此只能执行全量替换，不能假装成选择性合并。
+
+**模块划分**
+
+- `backup/service.py`：备份、检查、导入、恢复、安全备份、严格验证和稳定错误码。
+- `backup/locking.py`：Linux `fcntl.flock` 跨进程锁和进程内可重入控制。
+- `backup/runtime.py`：`vault_generation`、Worker 暂停状态和原子 JSON 写入。
+- `backup/errors.py`：CLI、Streamlit、Worker 共用的稳定错误对象。
+- `storage/database.py`：所有 Repository 连接自动持有共享 vault 锁，并正式维护 `PRAGMA user_version=1`。
+- `tests/test_backup.py`：密码学、边界校验、双库回滚、代次重载和 Worker 暂停测试。
+
+**`.lvbackup` v1 容器**
+
+```text
+8-byte magic
+-> format version + canonical header length
+-> canonical JSON header (algorithm, fixed KDF parameters, salt, nonce)
+-> AES-GCM ciphertext
+-> 16-byte authentication tag
+```
+
+明文头部只承担解密所必需的协议协商，不包含用户、时区、创建时间、记录数或备份类型。整个规范头部作为 AES-GCM AAD，修改 salt、nonce 或算法字段都会导致认证失败或固定配置拒绝。
+
+加密参数：
+
+- scrypt：32 字节随机 salt，`N=2^17, r=8, p=1`，输出 256 位密钥。
+- AES-256-GCM：12 字节随机 nonce，16 字节 tag。
+- 密码：NFC 规范化后的 12–256 个 Unicode 字符，不裁剪首尾空格。
+- 依赖：`cryptography>=46.0.3,<50`；源码启动也检查实际加载版本，不能静默使用系统旧库。
+
+加密前载荷是严格 ZIP/DEFLATE，只允许：
+
+```text
+manifest.json
+vault.sqlite
+langgraph.sqlite
+```
+
+解密必须先完成 GCM 认证，再解析 ZIP。条目数量、重复名称、绝对路径、`..`、目录、符号链接、特殊文件、声明大小、累计 1 GiB 上限和实际写出大小都要检查。数据库 SHA-256、结构 SHA-256 和逻辑大小保存在加密 manifest 中。
+
+**创建流程**
+
+```text
+输入并二次确认密码
+-> 获取独立 crypto 锁
+-> 获取 vault 独占锁
+-> SQLite Connection.backup() 快照两个数据库
+-> quick_check + schema/user-scope 校验
+-> 手动备份释放 vault 锁
+-> 生成 manifest 和 ZIP
+-> 流式 AES-GCM 写 UUID.lvbackup.partial
+-> 重新解密并比对 ZIP 哈希
+-> fsync 文件
+-> os.replace 原子发布 UUID.lvbackup
+-> fsync 目录
+-> 写 create_backup 审计
+```
+
+checkpoint 从未使用时，备份中放入合法空 SQLite，并标记 `checkpoint_state=empty`。已存在但损坏的 checkpoint 不能静默替换为空库。
+
+成功审计发生在快照之后，因此一个备份不会包含“创建自身成功”的审计事件；当前活动数据库会包含该事件，manifest 则提供备份本身的来源元数据。这避免了“备份必须先成功，成功记录又必须预先在备份里”的循环依赖。
+
+**导入与检查**
+
+- `list` 不需要密码，只扫描严格 UUID 文件名，显示 ID、密文大小、文件系统时间和 `unverified`。
+- `inspect` 每次重新执行 scrypt、GCM、ZIP、manifest、数据库和用户边界验证。
+- `import` 只接受普通、非软/硬链接文件；验证成功后才按 manifest UUID 原子写入固定备份目录。
+- 同 ID 同哈希返回 `already_present`；同 ID 不同哈希返回 `backup_id_conflict`，绝不覆盖。
+- 密码错误和合法结构内的密文篡改都返回 `backup_authentication_failed`，不提供密码猜测 oracle。
+
+**恢复事务**
+
+恢复不能用一次 `os.replace` 原子替换两个文件。v0.18 使用“数据库锁 + 同文件系统候选 + 持久化事务日志”补齐跨文件崩溃一致性：
+
+```text
+第一次密码：只读恢复预览
+-> 完整输入 backup ID
+-> 第二次密码：重新认证并重算密文 SHA-256
+-> vault 独占锁
+-> 两个活动库 wal_checkpoint(TRUNCATE)
+-> 用同一密码创建并验证 pre_restore_safety 备份
+-> 候选库复制到各自目标目录并 fsync
+-> 写 prepared 恢复日志并 fsync
+-> 原库改名为 UUID rollback 文件
+-> 候选库依次 os.replace 到正式路径
+-> quick_check、结构、用户和 checkpoint 校验
+-> 在恢复出的业务库写 restore_backup 审计
+-> 更新 vault_generation 并暂停 Worker
+-> 写 committed 阶段
+-> 删除事务日志和明文 rollback/candidate
+```
+
+WAL 处理是必要步骤。只替换 `.db` 主文件会让旧 `-wal/-shm` 把备份时点之后的 checkpoint 重新叠加到恢复库。对应回归测试让旧 Graph Agent 保持连接，恢复后确认它只能看到备份时点内的线程。
+
+任何阶段失败都会把两个原数据库一起恢复。进程在中途退出时，下次 CLI、Streamlit、Worker 或 MCP Server 启动先读取恢复日志：未提交阶段自动回滚；`committed` 阶段只完成残留清理，不能误回滚已成功恢复的数据。无法确定状态时返回 `restore_recovery_required` 并拒绝猜测。
+
+**锁与运行代次**
+
+- 普通 Repository、Graph、MCP 和 Worker 操作使用 3 秒共享锁。
+- 手动快照使用 10 秒独占锁，正式恢复使用 30 秒独占锁。
+- scrypt 约使用 128 MiB 内存，另有 crypto 独占锁串行化创建、导入、检查和恢复认证。
+- 手动备份只在双库快照阶段阻塞业务；安全备份为了精确保存恢复前状态，会一直持锁到加密、验证和审计完成。
+- 恢复更新外部运行状态中的 UUID `vault_generation`。Graph 发现变化后关闭旧 checkpoint 连接并重建；MCP/Worker 的数据库操作不能跨代次写回。
+- Worker 恢复后默认暂停，不发送提醒也不推进订阅。CLI 输入 `RESUME WORKER` 或 Streamlit 明确勾选后，审计成功才解除暂停。
+
+运行状态文件、锁和恢复日志都位于业务数据库旁，不进入备份：
+
+```text
+<LIFEVAULT_DB>.runtime.json
+<LIFEVAULT_DB>.lock
+<LIFEVAULT_DB>.backup-crypto.lock
+<LIFEVAULT_DB>.restore-journal.json
+```
+
+运行状态损坏时生成新代次、强制暂停 Worker 并写 `runtime_state_recovered` 审计。失败操作留下的 staging、`.partial`、candidate 和 rollback 只有在确认没有活动锁或恢复日志时才清理。
+
+**接口与能力边界**
+
+CLI：
+
+```text
+backup create
+backup list
+backup inspect BACKUP_ID
+backup import FILE
+backup restore BACKUP_ID
+backup status
+backup resume-worker
+```
+
+密码只通过 `getpass` 或 Streamlit 密码控件进入。没有 `--password`、`--yes`、`--force`、自定义单次输出目录、删除命令或跳过检查开关。Streamlit 在操作提交后清除密码 widget 状态，恢复预览只保存非秘密汇总、密文 SHA-256 和 15 分钟有效期。
+
+备份不属于 MCP 数据工具。MCP Tool 无法读取任意路径、接收密码、创建备份或替换数据库；测试明确断言工具清单中没有备份能力。原因是 MCP 面向模型可调用的个人记录能力，而整库恢复是本地运维权限。
+
+**为什么没有换 PostgreSQL**
+
+PostgreSQL 可以在同一实例中用事务协调业务表和 checkpoint 表，但这要求重写 Repository、checkpointer、部署和恢复模型，并让本地个人应用依赖常驻数据库服务。v0.18 的目标是补齐 SQLite 本地备份，不是迁移存储后端。
+
+未来出现网络服务、多用户权限和高并发需求时，再把 PostgreSQL 作为独立架构版本讨论；不能用“为了备份原子性”顺带引入整个服务端数据库栈。
+
+**明确不做**
+
+- JSON/CSV、选择性恢复、合并恢复、增量/差异备份。
+- 云备份、计划任务、自动保留期、应用内删除备份。
+- 密码持久化、系统钥匙串、恢复密钥或绕过认证。
+- 跨用户 ID 映射、强制降级、未知结构兼容或跳过校验。
+- 配置、代码、附件、日志和已有备份嵌套打包。
+- PostgreSQL 迁移和业务记录物理删除。
+
+**学习重点**
+
+- “文件加密”不等于“可恢复系统”：还需要快照一致性、格式边界、资源上限、审计、失败回滚和进程重载。
+- 两个文件无法共享一个文件系统原子替换点；持久化阶段日志可以把中断操作变成启动时可判定的状态机。
+- 数据库主文件、WAL 和长连接共同构成运行状态，测试只替换 `.db` 的 happy path 会漏掉真实恢复错误。
+- 密码学参数必须固定并限制，不能让不可信头部自行指定超大 KDF 资源。
+- 全量恢复会让旧提醒重新出现，因此数据一致性之外还需要暂停长期副作用。
+- PostgreSQL 是未来部署模型决策，不是当前 SQLite 恢复问题的局部工具。
+
+---
+
+## 22. 当前测试体系
+
+当前共有 146 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
@@ -941,6 +1108,7 @@ sanitized input
 | `test_worker.py` | 通知、免打扰、失败和周期推进 |
 | `test_app.py` | Streamlit 校对、提醒选择、记录编辑和归档/恢复视图 |
 | `test_cli.py` | CLI 结构化校对、局部更新和归档/恢复命令 |
+| `test_backup.py` | 加密认证、恶意归档、结构/用户边界、安全备份、双库回滚、Graph 重载和 Worker 暂停 |
 
 常用验证命令：
 
@@ -960,7 +1128,7 @@ python3 -m py_compile \
 git diff --check
 ```
 
-## 22. 推荐学习顺序
+## 23. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -1014,7 +1182,18 @@ git diff --check
 
 目标：理解 Agent 对话结束后，长期任务如何继续可靠运行。
 
-## 23. 用 Git 学习每次迭代
+### 第六阶段：理解备份与恢复
+
+1. 阅读 `backup/locking.py` 和 `backup/runtime.py`。
+2. 阅读 `backup/service.py` 的 `_encrypt_container()` 与 `_decrypt_container()`。
+3. 跟踪 `create_backup()` 的锁释放点。
+4. 跟踪 `restore_backup()`、恢复日志阶段和 `_rollback_journal()`。
+5. 运行 `tests/test_backup.py`，重点阅读 WAL、双库故障和 Graph 代次测试。
+6. 对比 MCP 工具列表，确认备份权限为何留在可信本地服务。
+
+目标：理解加密文件、数据库快照、跨文件事务和长期进程重载如何组合成可用的恢复能力。
+
+## 24. 用 Git 学习每次迭代
 
 查看自然语言更新版本的完整实现提交：
 
@@ -1066,9 +1245,10 @@ bbb7ec2  v0.14 校对闭环
 8cf4704  v0.15 保存后编辑
 e9cace7  v0.16 自然语言更新
 af6ef69  v0.17 记录归档与恢复
+e91b0c2  v0.18 加密整库备份与恢复
 ```
 
-## 24. 尚未实现的能力
+## 25. 尚未实现的能力
 
 当前明确未实现：
 
@@ -1079,6 +1259,8 @@ af6ef69  v0.17 记录归档与恢复
 - 自动付款、退款或取消订阅。
 - 草稿版本历史与撤销。
 - 多条记录批量更新和跨记录原子操作。
+- JSON/CSV、选择性、合并、增量、云端和计划备份。
+- PostgreSQL 服务端存储和多用户备份权限。
 
 后续版本仍应保持当前迭代方式：
 
