@@ -2,6 +2,16 @@
 
 All notable changes to LifeVault are documented here.
 
+## [1.0.1] - 2026-08-01
+
+### Fixed
+
+- Recognize purchase return windows written as `N 天内可以退货`, `N 天以内可退货`, or `N 天支持退货` instead of incorrectly interrupting for a missing `return_deadline`.
+
+### Verified
+
+- Added the exact web-demo report as a unit and extraction-evaluation regression case; fallback extraction passes 73/73 cases and 460/460 expected fields.
+
 ## [1.0.0] - 2026-08-01
 
 ### Added

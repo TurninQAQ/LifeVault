@@ -541,7 +541,11 @@ def _extract_target_remind_before_days(text: str, target: str) -> int | None:
 
 
 def _extract_return_days(text: str) -> int | None:
-    match = re.search(r"([零一二两三四五六七八九十百\d]+)\s*天(?:无理由|退货|可退)", text)
+    match = re.search(
+        r"([零一二两三四五六七八九十百\d]+)\s*天(?:以?内)?\s*"
+        r"(?:无理由(?:退货)?|(?:可以|可|支持)?退货|可退)",
+        text,
+    )
     return parse_int(match.group(1)) if match else None
 
 

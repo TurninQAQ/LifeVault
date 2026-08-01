@@ -1,6 +1,6 @@
 # LifeVault
 
-LifeVault v1.0 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
+LifeVault v1.0.1 is a local-first life record and reminder assistant. It uses local Qwen for language understanding, LangGraph for human-in-the-loop create and update workflows, MCP for the personal vault data boundary, deterministic Python tools for dates and validation, SQLite for durable records, and a reminder worker for local notifications.
 
 For a version-by-version implementation walkthrough, see [skill.md](skill.md).
 Release evidence and operational boundaries are documented in [the v1.0 audit](docs/V1_RELEASE_AUDIT.md), [the three-minute demo](docs/DEMO.md), [the changelog](CHANGELOG.md), and [the security policy](SECURITY.md).
@@ -188,6 +188,11 @@ v1.0 closes the release-readiness loop:
 - Browser-driven desktop and mobile checks verify that the Streamlit add, records, reminders, and backup views finish rendering without blank output, skeleton residue, or overlapping controls.
 - `CHANGELOG.md`, `SECURITY.md`, a requirement-by-requirement release audit, and a reproducible three-minute demo define what v1.0 proves and what remains outside the local MVP.
 - v1.0 supports Python 3.10+ on POSIX systems with `fcntl.flock`. The UI remains loopback-only and must not be exposed as an unauthenticated remote service.
+
+v1.0.1 fixes a return-window extraction gap found through the web demo:
+
+- Purchase fallback extraction now accepts phrases such as `14 天内可以退货`, `14 天以内可退货`, and `14 天支持退货` in addition to the existing `14 天可退` form.
+- The exact reported mechanical-keyboard input is retained as a regression case. The fallback creation evaluation now passes 73/73 cases and 460/460 expected fields.
 
 Create-record interrupts:
 
