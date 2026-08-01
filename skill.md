@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.19 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v1.0 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.19 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v1.0 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -23,6 +23,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - 已保存记录可以归档和恢复；归档会取消活动提醒，但不会混用业务状态或物理删除数据。
 - 整个本地知识库可以导出为强制密码加密的双数据库快照，并通过安全备份和崩溃日志完成全量恢复。
 - 项目可以构建成包含 Skill 和评测集的标准 wheel，并用一个本地监督命令同时启动 UI 与 Worker。
+- 发布前可以用只读 Doctor、完整评测、MCP smoke、浏览器渲染和全新依赖安装给出可复核证据。
 
 核心设计原则：
 
@@ -102,6 +103,7 @@ Worker 负责长期任务
 - [`lifevault/skills/__init__.py`](lifevault/skills/__init__.py)：包内 Skill 的白名单加载器。
 - [`lifevault/runtime/supervisor.py`](lifevault/runtime/supervisor.py)：UI 与 Worker 的本地进程监督器。
 - [`lifevault/config.py`](lifevault/config.py)：源码/安装环境的数据目录和运行配置。
+- [`lifevault/diagnostics.py`](lifevault/diagnostics.py)：安装、资源、数据库、运行状态和 Qwen 的只读诊断。
 
 ## 3. 版本总览
 
@@ -126,6 +128,7 @@ Worker 负责长期任务
 | v0.17 | `af6ef69` | 记录归档与恢复 | 可恢复删除、提醒一致性和归档查询范围 |
 | v0.18 | `e91b0c2` | 加密整库备份 | 双 SQLite 快照、认证加密和崩溃恢复 |
 | v0.19 | `877137d` | 可安装与一键运行 | wheel、包内资源、Skill 加载和进程监督 |
+| v1.0 | `dcf9a19` | 正式发布验收 | Doctor、全新安装、视觉验收、演示和发布材料 |
 
 ---
 
@@ -1175,9 +1178,73 @@ LifeVault 是本机桌面通知和本地 Qwen 客户端。Docker 会额外引入
 
 ---
 
-## 23. 当前测试体系
+## 23. v1.0：正式发布验收
 
-当前共有 159 个测试，主要分层如下：
+**目标**
+
+v1.0 不再以“又增加一个业务功能”为目标，而是证明原架构定义的本地单用户 MVP 已经完整、可安装、可诊断、可恢复和可演示。完成标准来自需求文档，而不是从已有代码反推一个容易通过的标准。
+
+**逐项完成审计**
+
+`docs/V1_RELEASE_AUDIT.md` 把功能、安全和工程要求分别映射到权威证据：日期/Graph/Worker 使用对应分层测试，模型质量使用 fallback 与真实 Qwen 评测，MCP 使用真实 stdio smoke，安装运行使用最终 wheel，UI 使用真实浏览器。窄测试不能证明宽要求，例如健康端点只能证明服务响应，不能证明页面已经完成渲染。
+
+审计也明确排除 OCR/PDF、云同步、远程访问、多用户、PostgreSQL、外部支付/取消和增量云备份。这些在原始 MVP 中已经是明确边界，需要新的来源、权限或部署架构，不应为了“看起来功能多”混入 1.0。
+
+**只读 Doctor**
+
+`lifevault doctor` 检查：
+
+- Python 3.10+ 和 POSIX 文件锁平台。
+- 所有直接依赖是否安装且版本处于声明范围。
+- 三个 Skill、72 条创建评测和 36 条更新评测是否真的在安装包内。
+- 业务库、checkpoint 和备份目录的最近父目录是否可写。
+- 两个 SQLite 的只读 `quick_check`，以及业务库 schema 是否过新或待迁移。
+- 是否残留恢复事务日志，Worker 运行状态是否损坏或在恢复后暂停。
+- 本地 OpenAI-compatible `/models` 是否列出配置的 Qwen；网络请求禁用环境代理继承。
+
+Doctor 不调用 `init_db()`、不执行恢复、不修复运行状态，也不创建数据库。新安装中未初始化的数据库是 warning；`init-db` 后 `doctor --strict` 必须零 warning。JSON 模式可以接入脚本或发布门禁。
+
+**干净依赖环境发现的问题**
+
+把 wheel 连同依赖安装到空目录后，MCP 与评测通过，但 Streamlit 1.60 因目标路径不含 `site-packages` 而误判为框架开发模式，拒绝 `--server.port`。这证明“现有开发机能启动”不是新环境证据。监督器显式传入 production mode 后，最新允许依赖组合完成 UI+Worker 启动、健康检查和干净关停。
+
+直接依赖范围也进入 Doctor 验证。仅检查 `import` 不够，因为 `streamlit==2.x` 或未知 cryptography 版本即使能导入，也不在当前兼容声明内。`packaging` 因此成为显式直接依赖，用标准 Specifier 解析所有范围。
+
+最终发布脚本还发现创建评测的 `--use-qwen` 曾只改变报告标签：全局设置禁用 Qwen 时，实际执行器仍走 fallback。v1.0 统一用 `dataclasses.replace(settings, use_qwen=...)` 强制两套评测的显式模式，并保留 backup 等新增配置字段；回归测试直接检查传给 Extractor 的设置，防止把 fallback 成绩误报成模型成绩。
+
+**真实浏览器视觉验收**
+
+HTTP `/_stcore/health=ok` 之后，第一次 Firefox 命令行截图仍是全白，因为动态前端尚未完成 WebSocket 渲染。最终使用 geckodriver 驱动 headless Firefox，等待 textarea、记录内容和提醒状态出现，并等待所有 `stSkeleton` 消失后截图：
+
+- 1440px 添加记录页面。
+- 1440px 三类记录和编辑/归档操作。
+- 1440px 提醒卡片和 snooze 操作。
+- 1440px 备份状态、密码和导入界面。
+- 390px 移动添加页面。
+
+截图证明这些视口没有空白、骨架残留或控件重叠。五个状态生成 179.967 秒 H.264 演示视频，逐段讲稿在 `docs/DEMO.md`。
+
+**发布材料**
+
+- `CHANGELOG.md`：v1.0 能力、验证结果和兼容边界。
+- `SECURITY.md`：本地威胁模型、模型/MCP/备份边界和非保护场景。
+- `docs/V1_RELEASE_AUDIT.md`：逐要求证据和最终发布命令。
+- `docs/DEMO.md` 与 MP4：临时 vault 演示流程，不接触真实数据。
+- `README.md`：安装、Doctor、一键启动、架构、备份、MCP、支持平台和 release scope。
+
+**学习重点**
+
+- 发布验收的核心是证据层级匹配：源码、测试、构建产物、干净安装和真实运行各自证明不同事情。
+- Doctor 应默认只读；诊断工具如果悄悄修复数据库，会毁掉故障现场并让报告失真。
+- 依赖上限只有在最新允许版本组合上实际启动过才有意义。
+- 健康检查、DOM 内容和视觉截图是三个不同层次，不能互相替代。
+- 1.0 的边界必须明确，未纳入 MVP 的服务端能力不能被误报为缺陷，也不能被暗示已经支持。
+
+---
+
+## 24. 当前测试体系
+
+当前共有 169 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
@@ -1202,6 +1269,7 @@ LifeVault 是本机桌面通知和本地 Qwen 客户端。Docker 会额外引入
 | `test_cli.py` | CLI 结构化校对、局部更新和归档/恢复命令 |
 | `test_backup.py` | 加密认证、恶意归档、结构/用户边界、安全备份、双库回滚、Graph 重载和 Worker 暂停 |
 | `test_release_runtime.py` | 包内 Skill/评测资源、数据目录、Qwen Skill 选择和本地监督器 |
+| `test_diagnostics.py` | Doctor 只读诊断、schema/依赖失败、Worker 暂停和 CLI 严格模式 |
 
 常用验证命令：
 
@@ -1211,6 +1279,7 @@ python3 -m lifevault.cli eval
 python3 -m lifevault.cli eval-updates
 python3 -m lifevault.cli eval-updates --use-qwen
 python3 -m lifevault.cli mcp-smoke
+python3 -m lifevault.cli doctor --strict
 python3 -m pip wheel . --no-deps --wheel-dir dist
 python3 -m py_compile \
   lifevault/models/schemas.py \
@@ -1222,7 +1291,7 @@ python3 -m py_compile \
 git diff --check
 ```
 
-## 24. 推荐学习顺序
+## 25. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -1287,7 +1356,7 @@ git diff --check
 
 目标：理解加密文件、数据库快照、跨文件事务和长期进程重载如何组合成可用的恢复能力。
 
-## 25. 用 Git 学习每次迭代
+## 26. 用 Git 学习每次迭代
 
 查看自然语言更新版本的完整实现提交：
 
@@ -1341,9 +1410,10 @@ e9cace7  v0.16 自然语言更新
 af6ef69  v0.17 记录归档与恢复
 e91b0c2  v0.18 加密整库备份与恢复
 877137d  v0.19 可安装包与一键本地运行
+dcf9a19  v1.0 正式发布验收
 ```
 
-## 26. 尚未实现的能力
+## 27. 尚未实现的能力
 
 当前明确未实现：
 
@@ -1356,7 +1426,7 @@ e91b0c2  v0.18 加密整库备份与恢复
 - 多条记录批量更新和跨记录原子操作。
 - JSON/CSV、选择性、合并、增量、云端和计划备份。
 - PostgreSQL 服务端存储和多用户备份权限。
-- 三分钟演示视频、正式 v1.0 发布说明和公开发布许可证。
+- 独立开源复用许可证；当前仓库未额外授予再分发或派生使用许可。
 
 后续版本仍应保持当前迭代方式：
 
