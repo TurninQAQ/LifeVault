@@ -105,6 +105,7 @@ class LocalSupervisorTest(unittest.TestCase):
         self.assertEqual(plan.url, "http://127.0.0.1:8512")
         self.assertIn("lifevault/app/main.py", plan.streamlit_command[4])
         self.assertIn("--server.headless", plan.streamlit_command)
+        self.assertIn("--global.developmentMode", plan.streamlit_command)
         self.assertEqual(
             plan.worker_command,
             (

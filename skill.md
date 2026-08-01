@@ -1152,6 +1152,8 @@ lifevault serve
 
 第一次真实双进程测试暴露了终端 Ctrl-C 会同时发送给所有前台子进程，导致 Worker 打印 `KeyboardInterrupt` 堆栈。最终实现用独立 POSIX child session 隔离终端信号，由监督器统一发送终止信号；独立运行 Worker 时也捕获 Ctrl-C 并安静退出。
 
+随后把完整依赖树安装到空目录时，最新允许版本 Streamlit 1.60 因 `--target` 路径不含 `site-packages` 而误判为框架开发模式，并拒绝自定义端口。监督器显式传入 `--global.developmentMode false`；这在普通 wheel/venv 中保持生产模式，在隔离目标目录中也能稳定启动。
+
 **验证方式**
 
 - 从仓库构建真实 wheel，并检查其中包含 53 个代码、Skill、评测和元数据条目。

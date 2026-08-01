@@ -55,6 +55,8 @@ def build_launch_plan(
         "true",
         "--browser.gatherUsageStats",
         "false",
+        "--global.developmentMode",
+        "false",
     )
     worker_command = None
     if not no_worker:
