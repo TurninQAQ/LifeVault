@@ -1,11 +1,11 @@
 ---
 name: lifevault-version-learning
-description: LifeVault v0.1-v0.18 的版本迭代、实现路径与工程学习记录。
+description: LifeVault v0.1-v0.19 的版本迭代、实现路径与工程学习记录。
 ---
 
 # LifeVault 版本迭代学习手册
 
-这份文档记录 LifeVault 从 v0.1 到 v0.18 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
+这份文档记录 LifeVault 从 v0.1 到 v0.19 的演进过程。它不是产品使用说明，而是面向学习者的实现索引：每一版解决什么问题、为什么这样拆分、代码写在哪里、可以学到什么。
 
 ## 1. 项目的核心目标
 
@@ -22,6 +22,7 @@ LifeVault 是一个本地优先的生活事项记录与提醒 Agent，支持：
 - 已保存记录可以通过独立 LangGraph 自然语言修改，但必须由用户选择目标并确认补丁。
 - 已保存记录可以归档和恢复；归档会取消活动提醒，但不会混用业务状态或物理删除数据。
 - 整个本地知识库可以导出为强制密码加密的双数据库快照，并通过安全备份和崩溃日志完成全量恢复。
+- 项目可以构建成包含 Skill 和评测集的标准 wheel，并用一个本地监督命令同时启动 UI 与 Worker。
 
 核心设计原则：
 
@@ -98,6 +99,9 @@ Worker 负责长期任务
 - [`lifevault/worker/reminder_worker.py`](lifevault/worker/reminder_worker.py)：后台提醒执行。
 - [`lifevault/app/main.py`](lifevault/app/main.py)：Streamlit 界面。
 - [`lifevault/cli.py`](lifevault/cli.py)：CLI 与调试入口。
+- [`lifevault/skills/__init__.py`](lifevault/skills/__init__.py)：包内 Skill 的白名单加载器。
+- [`lifevault/runtime/supervisor.py`](lifevault/runtime/supervisor.py)：UI 与 Worker 的本地进程监督器。
+- [`lifevault/config.py`](lifevault/config.py)：源码/安装环境的数据目录和运行配置。
 
 ## 3. 版本总览
 
@@ -120,6 +124,8 @@ Worker 负责长期任务
 | v0.15 | `8cf4704` | 保存后编辑 | 原子更新记录并重排已有提醒 |
 | v0.16 | `e9cace7` | 自然语言更新 | 选目标、预览、纠正、确认后原子修改 |
 | v0.17 | `af6ef69` | 记录归档与恢复 | 可恢复删除、提醒一致性和归档查询范围 |
+| v0.18 | `e91b0c2` | 加密整库备份 | 双 SQLite 快照、认证加密和崩溃恢复 |
+| v0.19 | `877137d` | 可安装与一键运行 | wheel、包内资源、Skill 加载和进程监督 |
 
 ---
 
@@ -1083,9 +1089,93 @@ PostgreSQL 可以在同一实例中用事务协调业务表和 checkpoint 表，
 
 ---
 
-## 22. 当前测试体系
+## 22. v0.19：可安装包与一键本地运行
 
-当前共有 146 个测试，主要分层如下：
+**目标**
+
+把“在仓库目录执行 Python 模块”升级成可安装、可迁移、可验证的本地应用，同时补上架构文档要求的“一键启动”。这一版不改变业务数据模型、MCP Tool、Graph 状态或备份格式，只修复发布和运行边界。
+
+**从一次失败的发布审计开始**
+
+v0.18 的源码测试全部通过，但执行：
+
+```bash
+python3 -m pip wheel . --no-deps
+```
+
+得到的却是只有 521 字节的 `UNKNOWN-0.0.0` wheel，里面没有 LifeVault 代码。当前机器的 Ubuntu 系统 Setuptools 是 59.6，旧版构建路径不会读取仅写在 `pyproject.toml [project]` 中的元数据；“pip 命令退出 0”因此不能证明包真的可安装。
+
+v0.19 把兼容元数据放入 `setup.cfg`，版本继续从 `lifevault.__version__` 单点读取，并在 `pyproject.toml` 保留标准 PEP 517 构建后端。正式 wheel 变为 `lifevault-0.19.0-py3-none-any.whl`，包含完整代码、入口点和资源。
+
+**包内资源和 Skill 加载**
+
+原来的 `skills/` 与 `sample_data/` 位于 Python 包之外，源码目录中可见，但安装 wheel 后会消失。v0.19 将它们移动到：
+
+```text
+lifevault/skills/<record_type>/SKILL.md
+lifevault/eval/data/examples.jsonl
+lifevault/eval/data/update_examples.jsonl
+```
+
+`setup.cfg [options.package_data]` 明确把 Markdown 和 JSONL 收入 wheel。`lifevault.skills.load_skill()` 只接受 purchase、subscription、bill 三个白名单名称，并限制单个 Skill 的字符数。
+
+此前 Skill 文件只是教学资产，Qwen 实际使用的是一个硬编码通用 Prompt。现在创建记录时先用确定性意图和类型规则选择一个 Skill，再把唯一匹配的内容放入 Qwen Prompt；查询意图不加载记录 Skill。模型仍然不能借 Skill 获得写库权限，Skill 只约束候选字段提取。
+
+真实 Qwen 评测第一次只通过 35/72 个完整 case：意图和类型都是 100%，主要失败来自模型把“会员/账单”拼进标题、重写日期原文和漏掉提前天数。最终 `reconcile_extracted_candidate()` 让文本中有直接规则证据的字段覆盖模型表达，规则没有识别出的字段仍保留 Qwen 结果；类型不一致时也不会用错误类型的规则覆盖模型字段。修正后本地 Qwen 与 fallback 都通过 72/72 case 和 448/448 field。
+
+**可迁移数据目录**
+
+源码版过去把默认数据库放在项目 `data/`，如果 wheel 沿用 `Path(__file__).parents[1]`，就会尝试向 `site-packages` 写数据库、备份和恢复日志。v0.19 的规则是：
+
+- Git 源码目录继续使用原有 `./data`，升级后不会看起来“丢失”旧记录。
+- 安装版使用平台用户数据目录，例如 Linux 的 `~/.local/share/lifevault`。
+- `LIFEVAULT_HOME` 可以统一迁移两个数据库、备份和运行文件。
+- 单独设置 `LIFEVAULT_DB` 时，默认 checkpoint 和 backup 目录跟随业务数据库父目录，避免测试或便携运行误用另一个 vault。
+- 备份 staging 也跟随业务数据库目录，不再依赖项目根目录。
+
+**单命令监督器**
+
+安装后提供两个 console entry point：
+
+```text
+lifevault
+lifevault-mcp
+```
+
+主启动命令是：
+
+```bash
+lifevault serve
+```
+
+`runtime/supervisor.py` 启动 Streamlit 和 ReminderWorker 两个子进程，监控任一子进程异常退出，并在 Ctrl-C 或 SIGTERM 时一起关闭。默认只绑定 loopback；当前 UI 没有网络认证，因此拒绝 `0.0.0.0` 等远程地址。首选端口占用时会在有限范围内选择下一个空闲端口，`--port 0` 则由操作系统分配。
+
+第一次真实双进程测试暴露了终端 Ctrl-C 会同时发送给所有前台子进程，导致 Worker 打印 `KeyboardInterrupt` 堆栈。最终实现用独立 POSIX child session 隔离终端信号，由监督器统一发送终止信号；独立运行 Worker 时也捕获 Ctrl-C 并安静退出。
+
+**验证方式**
+
+- 从仓库构建真实 wheel，并检查其中包含 53 个代码、Skill、评测和元数据条目。
+- 把 wheel 安装到 `/tmp`，在仓库外运行两个评测，仍分别通过 72/72 和 36/36。
+- 本地 Qwen 的创建与更新评测分别通过 72/72 和 36/36。
+- 从安装目录外启动 `lifevault serve --no-worker --port 0`，HTTP 健康端点返回 `ok`。
+- 源码模式同时启动 UI 和 Worker，已有 8501/8502 时自动选择 8503，Ctrl-C 后两个子进程均退出且没有 Worker 堆栈。
+
+**为什么选择一键启动而不是 Docker**
+
+LifeVault 是本机桌面通知和本地 Qwen 客户端。Docker 会额外引入宿主网络、GUI 通知总线、卷权限和平台差异，却不能让本地体验更简单。架构交付物允许“Docker 或一键启动脚本”，因此当前用可安装 CLI 监督器完成本地产品化；未来服务端、多用户或 PostgreSQL 版本再独立设计容器部署。
+
+**学习重点**
+
+- 单元测试通过不代表发布产物有效，必须检查 wheel 内容并从仓库外运行。
+- 运行资源、只读代码和可变用户数据必须有不同生命周期和安装位置。
+- Skill 只有被真实加载到模型上下文才是运行组件，否则只是文档。
+- 一键启动不仅是拼两个命令，还要处理端口、信号、子进程失败和安全绑定范围。
+
+---
+
+## 23. 当前测试体系
+
+当前共有 159 个测试，主要分层如下：
 
 | 测试文件 | 关注点 |
 |---|---|
@@ -1109,6 +1199,7 @@ PostgreSQL 可以在同一实例中用事务协调业务表和 checkpoint 表，
 | `test_app.py` | Streamlit 校对、提醒选择、记录编辑和归档/恢复视图 |
 | `test_cli.py` | CLI 结构化校对、局部更新和归档/恢复命令 |
 | `test_backup.py` | 加密认证、恶意归档、结构/用户边界、安全备份、双库回滚、Graph 重载和 Worker 暂停 |
+| `test_release_runtime.py` | 包内 Skill/评测资源、数据目录、Qwen Skill 选择和本地监督器 |
 
 常用验证命令：
 
@@ -1118,6 +1209,7 @@ python3 -m lifevault.cli eval
 python3 -m lifevault.cli eval-updates
 python3 -m lifevault.cli eval-updates --use-qwen
 python3 -m lifevault.cli mcp-smoke
+python3 -m pip wheel . --no-deps --wheel-dir dist
 python3 -m py_compile \
   lifevault/models/schemas.py \
   lifevault/agent/service.py \
@@ -1128,7 +1220,7 @@ python3 -m py_compile \
 git diff --check
 ```
 
-## 23. 推荐学习顺序
+## 24. 推荐学习顺序
 
 ### 第一阶段：理解确定性内核
 
@@ -1193,7 +1285,7 @@ git diff --check
 
 目标：理解加密文件、数据库快照、跨文件事务和长期进程重载如何组合成可用的恢复能力。
 
-## 24. 用 Git 学习每次迭代
+## 25. 用 Git 学习每次迭代
 
 查看自然语言更新版本的完整实现提交：
 
@@ -1246,9 +1338,10 @@ bbb7ec2  v0.14 校对闭环
 e9cace7  v0.16 自然语言更新
 af6ef69  v0.17 记录归档与恢复
 e91b0c2  v0.18 加密整库备份与恢复
+877137d  v0.19 可安装包与一键本地运行
 ```
 
-## 25. 尚未实现的能力
+## 26. 尚未实现的能力
 
 当前明确未实现：
 
@@ -1261,6 +1354,7 @@ e91b0c2  v0.18 加密整库备份与恢复
 - 多条记录批量更新和跨记录原子操作。
 - JSON/CSV、选择性、合并、增量、云端和计划备份。
 - PostgreSQL 服务端存储和多用户备份权限。
+- 三分钟演示视频、正式 v1.0 发布说明和公开发布许可证。
 
 后续版本仍应保持当前迭代方式：
 
